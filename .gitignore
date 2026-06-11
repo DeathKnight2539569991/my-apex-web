@@ -8,3 +8,5 @@ preview*.png
 *.local
 *.log
 tsconfig.*.tsbuildinfo
+agent.md
+todo.md

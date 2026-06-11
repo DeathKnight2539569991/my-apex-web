@@ -294,6 +294,16 @@ button:disabled {
   object-fit: contain;
 }
 
+.queue-status {
+  margin-top: 10px;
+  border: 1px solid rgba(93, 224, 230, 0.24);
+  border-radius: 7px;
+  background: rgba(20, 35, 35, 0.48);
+  color: #9deff2;
+  padding: 10px 12px;
+  font-size: 14px;
+}
+
 .ocr-status {
   display: flex;
   align-items: center;

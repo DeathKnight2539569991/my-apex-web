@@ -25,6 +25,11 @@ type OcrState = {
   progress: number;
 };
 
+type QueuedImage = {
+  id: string;
+  file: File;
+};
+
 type CloudState = {
   status: "idle" | "loading" | "ready" | "saving" | "error";
   message: string;
@@ -42,6 +47,7 @@ export default function App() {
   const [processedPreview, setProcessedPreview] = useState("");
   const [ocrRawText, setOcrRawText] = useState("");
   const [sourceImageName, setSourceImageName] = useState("");
+  const [imageQueue, setImageQueue] = useState<QueuedImage[]>([]);
   const [cloudState, setCloudState] = useState<CloudState>({
     status: "idle",
     message: "正在连接云端数据...",
@@ -55,6 +61,21 @@ export default function App() {
   useEffect(() => {
     void loadCloudData("");
   }, []);
+
+  useEffect(() => {
+    function handlePaste(event: ClipboardEvent) {
+      const files = getClipboardImageFiles(event);
+      if (files.length === 0) {
+        return;
+      }
+
+      event.preventDefault();
+      enqueueImages(files);
+    }
+
+    window.addEventListener("paste", handlePaste);
+    return () => window.removeEventListener("paste", handlePaste);
+  });
 
   const activePlayerId = selectedPlayerId || queryPlayerId.trim() || draft.playerId.trim();
   const activeMatches = matches;
@@ -122,13 +143,52 @@ export default function App() {
     }));
   }
 
-  async function handleImageChange(file: File | null) {
-    if (!file) {
+  function enqueueImages(files: Iterable<File>) {
+    const images = Array.from(files).filter(isImageFile);
+    if (images.length === 0) {
       return;
     }
 
+    const queuedImages = images.map((file) => ({
+      id: createId(),
+      file,
+    }));
+
+    if (hasActiveImage()) {
+      setImageQueue((current) => [...current, ...queuedImages]);
+      return;
+    }
+
+    const [nextImage, ...remainingImages] = queuedImages;
+    setImageQueue((current) => [...current, ...remainingImages]);
+    void processImage(nextImage.file);
+  }
+
+  function hasActiveImage() {
+    return Boolean(sourceImageName || imagePreview || processedPreview || ocrRawText || ocrState.status === "reading");
+  }
+
+  function advanceToNextQueuedImage() {
+    const nextImage = imageQueue[0];
+    if (!nextImage) {
+      return false;
+    }
+
+    setImageQueue((current) => current.slice(1));
+    setDraft((current) => ({ ...emptyDraft, playerId: current.playerId }));
+    void processImage(nextImage.file);
+    return true;
+  }
+
+  async function processImage(file: File) {
     setSourceImageName(file.name);
-    setImagePreview(URL.createObjectURL(file));
+    setImagePreview((current) => {
+      if (current) {
+        URL.revokeObjectURL(current);
+      }
+
+      return URL.createObjectURL(file);
+    });
     setProcessedPreview("");
     setOcrRawText("");
     setOcrState({
@@ -151,7 +211,7 @@ export default function App() {
       setOcrRawText(result.text.trim());
       setDraft((current) => ({
         ...current,
-        ...removeEmptyValues(extracted),
+        ...removeEmptyValues(removePlayerId(extracted)),
       }));
       setOcrState({
         status: "done",
@@ -185,6 +245,9 @@ export default function App() {
         status: "ready",
         message: `已保存到云端：${record.playerId} 现在有 ${payload.matches.length} 局记录。`,
       });
+      if (!advanceToNextQueuedImage()) {
+        clearImageInput({ preservePlayerId: true, clearQueue: false });
+      }
     } catch (error) {
       setCloudState({
         status: "error",
@@ -194,11 +257,30 @@ export default function App() {
   }
 
   function handleResetDraft() {
-    setDraft(emptyDraft);
-    setImagePreview("");
+    clearImageInput({ preservePlayerId: false, clearQueue: true });
+  }
+
+  function clearImageInput({
+    preservePlayerId,
+    clearQueue,
+  }: {
+    preservePlayerId: boolean;
+    clearQueue: boolean;
+  }) {
+    setDraft((current) => (preservePlayerId ? { ...emptyDraft, playerId: current.playerId } : emptyDraft));
+    setImagePreview((current) => {
+      if (current) {
+        URL.revokeObjectURL(current);
+      }
+
+      return "";
+    });
     setProcessedPreview("");
     setOcrRawText("");
     setSourceImageName("");
+    if (clearQueue) {
+      setImageQueue([]);
+    }
     setOcrState({
       status: "idle",
       message: "上传截图后会自动尝试识别，推荐只截左侧数据栏。",
@@ -349,7 +431,11 @@ export default function App() {
               <input
                 type="file"
                 accept="image/*"
-                onChange={(event) => void handleImageChange(event.target.files?.[0] ?? null)}
+                multiple
+                onChange={(event) => {
+                  enqueueImages(event.currentTarget.files ?? []);
+                  event.currentTarget.value = "";
+                }}
               />
               {imagePreview ? (
                 <img src={imagePreview} alt="上传的 Apex 数据截图预览" />
@@ -357,6 +443,10 @@ export default function App() {
                 <span>上传中文 Apex 数据截图，推荐只截左侧数据栏</span>
               )}
             </label>
+
+            {imageQueue.length > 0 ? (
+              <div className="queue-status">待处理图片：{imageQueue.length} 张。保存当前校准后会自动进入下一张，也可以直接粘贴图片加入队列。</div>
+            ) : null}
 
             <div className={`ocr-status ${ocrState.status}`}>
               <span>{ocrState.message}</span>
@@ -420,7 +510,7 @@ export default function App() {
             <button
               type="button"
               className="primary-button"
-              disabled={Boolean(validationError) || cloudState.status === "saving"}
+              disabled={Boolean(validationError) || cloudState.status === "saving" || ocrState.status === "reading"}
               onClick={handleSubmit}
             >
               保存到云端
@@ -589,7 +679,7 @@ function ZoneScoreCard({ title, zoneScore }: { title: string; zoneScore: ZoneSco
         <div className="zone-score-components" aria-label="区值评分主要加分项">
           {highlightedComponents.map((component) => (
             <span key={component.label}>
-              {component.label} {component.score}
+              {component.label}评分 {component.score}/100
             </span>
           ))}
         </div>
@@ -747,6 +837,34 @@ function createId() {
 
 function removeEmptyValues(draft: Partial<MatchDraft>) {
   return Object.fromEntries(Object.entries(draft).filter(([, value]) => value !== ""));
+}
+
+function removePlayerId(draft: Partial<MatchDraft>) {
+  const draftWithoutPlayerId = { ...draft };
+  delete draftWithoutPlayerId.playerId;
+  return draftWithoutPlayerId;
+}
+
+function isImageFile(file: File) {
+  return file.type.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp)$/i.test(file.name);
+}
+
+function getClipboardImageFiles(event: ClipboardEvent) {
+  const clipboardData = event.clipboardData;
+  if (!clipboardData) {
+    return [];
+  }
+
+  const files = Array.from(clipboardData.files).filter(isImageFile);
+  if (files.length > 0) {
+    return files;
+  }
+
+  return Array.from(clipboardData.items)
+    .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+    .map((item) => item.getAsFile())
+    .filter((file): file is File => file !== null)
+    .filter(isImageFile);
 }
 
 function translateOcrStatus(status: string) {

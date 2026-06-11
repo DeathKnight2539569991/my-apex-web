@@ -39,7 +39,7 @@ describe("OCR draft extraction", () => {
     `;
 
     expect(extractMatchDraftFromText(text)).toMatchObject({
-      playerId: "[POM] SangJoon",
+      playerId: "",
       kills: "14",
       assists: "0",
       knocks: "21",
@@ -64,7 +64,7 @@ describe("OCR draft extraction", () => {
     `;
 
     expect(extractMatchDraftFromText(text)).toMatchObject({
-      playerId: "DK",
+      playerId: "",
       kills: "1",
       assists: "3",
       knocks: "1",

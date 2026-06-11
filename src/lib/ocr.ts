@@ -30,8 +30,6 @@ const emptyDraft: MatchDraft = {
   survivalTime: "",
 };
 
-const metricLabels = ["击杀", "助攻", "击倒", "造成伤害", "生存时间", "存活时间", "急救次数", "重生次数"];
-
 export async function recognizeImage(file: File, onProgress?: (progress: OcrProgress) => void): Promise<OcrResult> {
   const processed = await preprocessStatPanel(file);
   const result = await Tesseract.recognize(processed.processedImageUrl, "chi_sim+eng", {
@@ -56,7 +54,6 @@ export function extractMatchDraftFromText(text: string): Partial<MatchDraft> {
   const compactText = lines.join("\n");
   const draft: Partial<MatchDraft> = { ...emptyDraft };
 
-  draft.playerId = findPlayerId(lines);
   parseKillAssistKnock(lines, compactText, draft);
   parseDamage(lines, compactText, draft);
   parseSurvivalTime(lines, compactText, draft);
@@ -192,19 +189,6 @@ function toCleanLines(text: string) {
     .split(/\r?\n/)
     .map((line) => line.replace(/\s+/g, " ").trim())
     .filter(Boolean);
-}
-
-function findPlayerId(lines: string[]) {
-  const labelIndex = lines.findIndex((line) => hasAnyLabel(line, ["击杀", "助攻", "击倒"]));
-  const candidateLines = labelIndex > 0 ? lines.slice(0, labelIndex) : lines.slice(0, 3);
-
-  return (
-    candidateLines.find((line) => {
-      const hasKnownLabel = metricLabels.some((label) => line.includes(label));
-      const looksLikeValueOnly = /^[\d,/:./ ]+$/.test(line);
-      return !hasKnownLabel && !looksLikeValueOnly && /[A-Za-z0-9\u4e00-\u9fa5]/.test(line);
-    }) ?? ""
-  );
 }
 
 function parseKillAssistKnock(lines: string[], compactText: string, draft: Partial<MatchDraft>) {

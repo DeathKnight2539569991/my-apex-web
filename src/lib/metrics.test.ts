@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { MatchRecord } from "../types";
+import type { MatchRecord, PlayerMetricsEntry } from "../types";
 import { formatDuration, parseDurationToSeconds, parseNumber } from "./format";
 import { calculateHistoryMetrics, calculateSingleMatchMetrics, calculateZoneScore } from "./metrics";
 import { extractMatchDraftFromText } from "./ocr";
@@ -135,4 +135,108 @@ describe("zone score", () => {
     expect(score.components).toHaveLength(8);
     expect(score.explanation).toContain("网站平均");
   });
+
+  it("keeps the numeric score stable when ranked title context is provided", () => {
+    const { playerMetrics, siteMetrics } = createRankingScenario(5);
+    const entry = playerMetrics[2];
+
+    const absoluteScore = calculateZoneScore(entry.metrics, siteMetrics);
+    const rankedScore = calculateZoneScore(entry.metrics, siteMetrics, {
+      playerId: entry.playerId,
+      playerMetrics,
+    });
+
+    expect(rankedScore.score).toBe(absoluteScore.score);
+  });
+
+  it("uses only the top ranked titles for two to four cloud players", () => {
+    const { playerMetrics, siteMetrics } = createRankingScenario(4);
+
+    const titles = playerMetrics.map((entry) =>
+      calculateZoneScore(entry.metrics, siteMetrics, {
+        playerId: entry.playerId,
+        playerMetrics,
+      }).title,
+    );
+
+    expect(titles).toEqual(["究极大区 🤣", "团队大腿🥵", "正常人类😀", "偶尔犯病😒"]);
+    expect(titles).not.toContain("伤害团队😭");
+  });
+
+  it("assigns one title per rank when there are five cloud players", () => {
+    const { playerMetrics, siteMetrics } = createRankingScenario(5);
+
+    const titles = playerMetrics.map((entry) =>
+      calculateZoneScore(entry.metrics, siteMetrics, {
+        playerId: entry.playerId,
+        playerMetrics,
+      }).title,
+    );
+
+    expect(titles).toEqual(["究极大区 🤣", "团队大腿🥵", "正常人类😀", "偶尔犯病😒", "伤害团队😭"]);
+  });
+
+  it("splits ranked titles proportionally when there are more than five cloud players", () => {
+    const { playerMetrics, siteMetrics } = createRankingScenario(10);
+    const titles = playerMetrics.map((entry) =>
+      calculateZoneScore(entry.metrics, siteMetrics, {
+        playerId: entry.playerId,
+        playerMetrics,
+      }).title,
+    );
+
+    expect(countByTitle(titles)).toEqual({
+      "究极大区 🤣": 2,
+      "团队大腿🥵": 2,
+      "正常人类😀": 2,
+      "偶尔犯病😒": 2,
+      "伤害团队😭": 2,
+    });
+  });
+
+  it("falls back to absolute score titles when the current player is not ranked", () => {
+    const { playerMetrics, siteMetrics } = createRankingScenario(5);
+    const entry = playerMetrics[0];
+
+    const absoluteScore = calculateZoneScore(entry.metrics, siteMetrics);
+    const missingRankScore = calculateZoneScore(entry.metrics, siteMetrics, {
+      playerId: "missing-player",
+      playerMetrics,
+    });
+
+    expect(missingRankScore.title).toBe(absoluteScore.title);
+  });
 });
+
+function createRankingScenario(playerCount: number) {
+  const matches = Array.from({ length: playerCount }, (_, index) => createRankedMatch(index));
+  const siteMetrics = calculateHistoryMetrics(matches);
+  const playerMetrics: PlayerMetricsEntry[] = matches.map((match) => ({
+    playerId: match.playerId,
+    metrics: calculateHistoryMetrics([match]),
+  }));
+
+  return { matches, playerMetrics, siteMetrics };
+}
+
+function createRankedMatch(index: number): MatchRecord {
+  const strength = 20 - index;
+
+  return {
+    ...baseMatch,
+    id: `ranked-${index + 1}`,
+    playerId: `player-${String(index + 1).padStart(2, "0")}`,
+    kills: strength,
+    assists: Math.floor(strength / 2),
+    knocks: strength + 3,
+    damage: strength * 120,
+    survivalSeconds: 720,
+  };
+}
+
+function countByTitle(titles: string[]) {
+  return titles.reduce<Record<string, number>>((counts, title) => {
+    counts[title] = (counts[title] ?? 0) + 1;
+    return counts;
+  }, {});
+}

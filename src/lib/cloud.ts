@@ -54,6 +54,7 @@ function isCloudDataResponse(value: unknown): value is CloudDataResponse {
     typeof value === "object" &&
     Array.isArray((value as CloudDataResponse).matches) &&
     Array.isArray((value as CloudDataResponse).players) &&
+    Array.isArray((value as CloudDataResponse).playerMetrics) &&
     Boolean((value as CloudDataResponse).siteMetrics) &&
     typeof (value as CloudDataResponse).siteMetrics === "object"
   );

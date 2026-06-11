@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type CSSProperties, type FormEvent, type 
 import ReactECharts from "echarts-for-react";
 import type { EChartsOption } from "echarts";
 import backgroundImage from "../6b68b6d7-178e-4bdc-9f5c-ed94e82b894b.png";
-import type { CloudDataResponse, HistoryMetrics, MatchDraft, MatchRecord, ZoneScore } from "./types";
+import type { CloudDataResponse, HistoryMetrics, MatchDraft, MatchRecord, PlayerMetricsEntry, ZoneScore } from "./types";
 import { deleteCloudMatch, deleteCloudPlayer, fetchCloudData, saveCloudMatch } from "./lib/cloud";
 import { formatDuration, formatNumber, formatPercent, parseDurationToSeconds, parseNumber } from "./lib/format";
 import { calculateHistoryMetrics, calculateSingleMatchMetrics, calculateZoneScore } from "./lib/metrics";
@@ -39,6 +39,7 @@ export default function App() {
   const [draft, setDraft] = useState<MatchDraft>(emptyDraft);
   const [matches, setMatches] = useState<MatchRecord[]>([]);
   const [players, setPlayers] = useState<string[]>([]);
+  const [playerMetrics, setPlayerMetrics] = useState<PlayerMetricsEntry[]>([]);
   const [siteMetrics, setSiteMetrics] = useState<HistoryMetrics>(emptySiteMetrics);
   const [adminDeleteEnabled, setAdminDeleteEnabled] = useState(false);
   const [selectedPlayerId, setSelectedPlayerId] = useState("");
@@ -86,7 +87,10 @@ export default function App() {
     () => (latestMatch ? calculateZoneScore(calculateHistoryMetrics([latestMatch]), siteMetrics) : null),
     [latestMatch, siteMetrics],
   );
-  const historyZoneScore = useMemo(() => calculateZoneScore(historyMetrics, siteMetrics), [historyMetrics, siteMetrics]);
+  const historyZoneScore = useMemo(
+    () => calculateZoneScore(historyMetrics, siteMetrics, { playerId: activePlayerId, playerMetrics }),
+    [activePlayerId, historyMetrics, playerMetrics, siteMetrics],
+  );
   const recentMatches = useMemo(() => activeMatches.slice(-10).reverse(), [activeMatches]);
   const validationError = validateDraft(draft);
 
@@ -117,6 +121,7 @@ export default function App() {
   function applyCloudPayload(payload: CloudDataResponse, preferredPlayerId: string) {
     setMatches(payload.matches);
     setPlayers(payload.players);
+    setPlayerMetrics(payload.playerMetrics);
     setSiteMetrics(payload.siteMetrics);
     setAdminDeleteEnabled(Boolean(payload.adminDeleteEnabled));
 

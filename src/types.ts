@@ -75,9 +75,15 @@ export type ZoneScore = {
   components: ZoneScoreComponent[];
 };
 
+export type PlayerMetricsEntry = {
+  playerId: string;
+  metrics: HistoryMetrics;
+};
+
 export type CloudDataResponse = {
   matches: MatchRecord[];
   players: string[];
   siteMetrics: HistoryMetrics;
+  playerMetrics: PlayerMetricsEntry[];
   adminDeleteEnabled: boolean;
 };

@@ -1,4 +1,4 @@
-import type { HistoryMetrics, MatchRecord, SingleMatchMetrics, ZoneScore, ZoneScoreComponent } from "../types";
+import type { HistoryMetrics, MatchRecord, PlayerMetricsEntry, SingleMatchMetrics, ZoneScore, ZoneScoreComponent } from "../types";
 import { clamp } from "./format";
 
 const RADAR_LIMITS = {
@@ -19,6 +19,13 @@ const ZONE_SCORE_BASELINES = {
   damageStability: 55,
 };
 
+const ZONE_SCORE_TITLES = ["究极大区 🤣", "团队大腿🥵", "正常人类😀", "偶尔犯病😒", "伤害团队😭"];
+
+type ZoneScoreRankingContext = {
+  playerId: string;
+  playerMetrics: PlayerMetricsEntry[];
+};
+
 export function calculateSingleMatchMetrics(match: MatchRecord): SingleMatchMetrics {
   const survivalMinutes = match.survivalSeconds / 60;
   const dpm = survivalMinutes > 0 ? match.damage / survivalMinutes : 0;
@@ -35,7 +42,11 @@ export function calculateSingleMatchMetrics(match: MatchRecord): SingleMatchMetr
   };
 }
 
-export function calculateZoneScore(playerMetrics: HistoryMetrics, siteMetrics: HistoryMetrics): ZoneScore {
+export function calculateZoneScore(
+  playerMetrics: HistoryMetrics,
+  siteMetrics: HistoryMetrics,
+  rankingContext?: ZoneScoreRankingContext,
+): ZoneScore {
   if (playerMetrics.matchCount === 0) {
     return {
       score: 0,
@@ -46,36 +57,8 @@ export function calculateZoneScore(playerMetrics: HistoryMetrics, siteMetrics: H
     };
   }
 
-  const components: ZoneScoreComponent[] = [
-    createZoneScoreComponent("场均伤害", playerMetrics.avgDamage, siteMetrics.avgDamage, ZONE_SCORE_BASELINES.avgDamage, 28),
-    createZoneScoreComponent("历史 DPM", playerMetrics.historicalDpm, siteMetrics.historicalDpm, ZONE_SCORE_BASELINES.historicalDpm, 18),
-    createZoneScoreComponent("场均击杀", playerMetrics.avgKills, siteMetrics.avgKills, ZONE_SCORE_BASELINES.avgKills, 16),
-    createZoneScoreComponent("场均助攻", playerMetrics.avgAssists, siteMetrics.avgAssists, ZONE_SCORE_BASELINES.avgAssists, 8),
-    createZoneScoreComponent("场均击倒", playerMetrics.avgKnocks, siteMetrics.avgKnocks, ZONE_SCORE_BASELINES.avgKnocks, 12),
-    createZoneScoreComponent(
-      "场均存活",
-      playerMetrics.avgSurvivalSeconds,
-      siteMetrics.avgSurvivalSeconds,
-      ZONE_SCORE_BASELINES.avgSurvivalSeconds,
-      8,
-    ),
-    createZoneScoreComponent(
-      "终结转化",
-      playerMetrics.historicalKnockConversionRate,
-      siteMetrics.historicalKnockConversionRate,
-      ZONE_SCORE_BASELINES.knockConversionRate,
-      5,
-    ),
-    createZoneScoreComponent(
-      "输出稳定",
-      playerMetrics.damageStability,
-      siteMetrics.damageStability,
-      ZONE_SCORE_BASELINES.damageStability,
-      5,
-    ),
-  ];
-
-  const score = Math.round(components.reduce((total, component) => total + component.score * component.weight, 0) / 100);
+  const components = createZoneScoreComponents(playerMetrics, siteMetrics);
+  const score = calculateZoneScoreValue(components);
   const strongest = [...components].sort((a, b) => b.score - a.score)[0];
   const weakest = [...components].sort((a, b) => a.score - b.score)[0];
   const sampleWarning =
@@ -87,7 +70,7 @@ export function calculateZoneScore(playerMetrics: HistoryMetrics, siteMetrics: H
 
   return {
     score,
-    title: getZoneScoreTitle(score),
+    title: getRankedZoneScoreTitle(rankingContext, siteMetrics) ?? getZoneScoreTitle(score),
     explanation: createZoneScoreExplanation(score, strongest, weakest),
     sampleWarning,
     components,
@@ -175,6 +158,41 @@ function normalize(value: number, limit: number) {
   return clamp((value / limit) * 100, 0, 100);
 }
 
+function createZoneScoreComponents(playerMetrics: HistoryMetrics, siteMetrics: HistoryMetrics): ZoneScoreComponent[] {
+  return [
+    createZoneScoreComponent("场均伤害", playerMetrics.avgDamage, siteMetrics.avgDamage, ZONE_SCORE_BASELINES.avgDamage, 28),
+    createZoneScoreComponent("历史 DPM", playerMetrics.historicalDpm, siteMetrics.historicalDpm, ZONE_SCORE_BASELINES.historicalDpm, 18),
+    createZoneScoreComponent("场均击杀", playerMetrics.avgKills, siteMetrics.avgKills, ZONE_SCORE_BASELINES.avgKills, 16),
+    createZoneScoreComponent("场均助攻", playerMetrics.avgAssists, siteMetrics.avgAssists, ZONE_SCORE_BASELINES.avgAssists, 8),
+    createZoneScoreComponent("场均击倒", playerMetrics.avgKnocks, siteMetrics.avgKnocks, ZONE_SCORE_BASELINES.avgKnocks, 12),
+    createZoneScoreComponent(
+      "场均存活",
+      playerMetrics.avgSurvivalSeconds,
+      siteMetrics.avgSurvivalSeconds,
+      ZONE_SCORE_BASELINES.avgSurvivalSeconds,
+      8,
+    ),
+    createZoneScoreComponent(
+      "终结转化",
+      playerMetrics.historicalKnockConversionRate,
+      siteMetrics.historicalKnockConversionRate,
+      ZONE_SCORE_BASELINES.knockConversionRate,
+      5,
+    ),
+    createZoneScoreComponent(
+      "输出稳定",
+      playerMetrics.damageStability,
+      siteMetrics.damageStability,
+      ZONE_SCORE_BASELINES.damageStability,
+      5,
+    ),
+  ];
+}
+
+function calculateZoneScoreValue(components: ZoneScoreComponent[]) {
+  return Math.round(components.reduce((total, component) => total + component.score * component.weight, 0) / 100);
+}
+
 function createZoneScoreComponent(
   label: string,
   playerValue: number | null,
@@ -205,24 +223,52 @@ function compareToSiteAverage(playerValue: number | null, siteValue: number | nu
   return Math.round(clamp(50 + (ratio - 1) * 35, 0, 100));
 }
 
+function getRankedZoneScoreTitle(rankingContext: ZoneScoreRankingContext | undefined, siteMetrics: HistoryMetrics) {
+  const playerId = rankingContext?.playerId.trim();
+  if (!playerId || !rankingContext || rankingContext.playerMetrics.length === 0) {
+    return null;
+  }
+
+  const rankedPlayers = rankingContext.playerMetrics
+    .filter((entry) => entry.metrics.matchCount > 0)
+    .map((entry) => ({
+      playerId: entry.playerId,
+      score: calculateZoneScoreValue(createZoneScoreComponents(entry.metrics, siteMetrics)),
+    }))
+    .sort((a, b) => b.score - a.score || a.playerId.localeCompare(b.playerId));
+
+  const rank = rankedPlayers.findIndex((entry) => entry.playerId === playerId);
+  if (rank === -1) {
+    return null;
+  }
+
+  const playerCount = rankedPlayers.length;
+  const tierIndex =
+    playerCount < ZONE_SCORE_TITLES.length
+      ? rank
+      : Math.min(Math.floor((rank * ZONE_SCORE_TITLES.length) / playerCount), ZONE_SCORE_TITLES.length - 1);
+
+  return ZONE_SCORE_TITLES[tierIndex] ?? null;
+}
+
 function getZoneScoreTitle(score: number) {
   if (score >= 92) {
-    return "究极大区 🤣";
+    return ZONE_SCORE_TITLES[0];
   }
 
   if (score >= 78) {
-    return "团队大腿🥵";
+    return ZONE_SCORE_TITLES[1];
   }
 
   if (score >= 58) {
-    return "正常人类😀";
+    return ZONE_SCORE_TITLES[2];
   }
 
   if (score >= 38) {
-    return "偶尔犯病😒";
+    return ZONE_SCORE_TITLES[3];
   }
 
-  return "伤害团队😭";
+  return ZONE_SCORE_TITLES[4];
 }
 
 function createZoneScoreExplanation(score: number, strongest: ZoneScoreComponent, weakest: ZoneScoreComponent) {

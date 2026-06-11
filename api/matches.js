@@ -71,12 +71,17 @@ export default async function handler(request, response) {
 async function getCloudPayload(playerId) {
   const players = await getPlayers();
   const matches = playerId ? await getPlayerMatches(playerId) : [];
-  const allMatches = await getAllMatches(players);
+  const playerMatchGroups = await getPlayerMatchGroups(players);
+  const allMatches = playerMatchGroups.flatMap((group) => group.matches);
 
   return {
     matches,
     players,
     siteMetrics: calculateHistoryMetrics(allMatches),
+    playerMetrics: playerMatchGroups.map((group) => ({
+      playerId: group.playerId,
+      metrics: calculateHistoryMetrics(group.matches),
+    })),
     adminDeleteEnabled: isAdminDeleteEnabled(),
   };
 }
@@ -125,7 +130,7 @@ async function getPlayerMatches(playerId) {
   }
 }
 
-async function getAllMatches(players) {
+async function getPlayerMatchGroups(players) {
   if (players.length === 0) {
     return [];
   }
@@ -133,18 +138,23 @@ async function getAllMatches(players) {
   const result = await redis(["MGET", ...players.map(getPlayerKey)]);
   const values = Array.isArray(result) ? result : [];
 
-  return values.flatMap((value) => {
-    if (!value) {
-      return [];
-    }
+  return players.map((playerId, index) => ({
+    playerId,
+    matches: parseMatchList(values[index]),
+  }));
+}
 
-    try {
-      const parsed = JSON.parse(value);
-      return Array.isArray(parsed) ? parsed.filter(isMatchRecord) : [];
-    } catch {
-      return [];
-    }
-  });
+function parseMatchList(value) {
+  if (!value) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter(isMatchRecord) : [];
+  } catch {
+    return [];
+  }
 }
 
 async function redis(command) {

@@ -1,0 +1,10 @@
+node_modules
+dist
+.vercel
+.npm-cache*
+.env
+.env.*
+preview*.png
+*.local
+*.log
+tsconfig.*.tsbuildinfo

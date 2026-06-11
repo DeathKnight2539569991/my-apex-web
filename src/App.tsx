@@ -2,10 +2,10 @@ import { useEffect, useMemo, useState, type CSSProperties, type FormEvent, type 
 import ReactECharts from "echarts-for-react";
 import type { EChartsOption } from "echarts";
 import backgroundImage from "../6b68b6d7-178e-4bdc-9f5c-ed94e82b894b.png";
-import type { CloudDataResponse, HistoryMetrics, MatchDraft, MatchRecord } from "./types";
-import { deleteCloudPlayer, fetchCloudData, saveCloudMatch } from "./lib/cloud";
+import type { CloudDataResponse, HistoryMetrics, MatchDraft, MatchRecord, ZoneScore } from "./types";
+import { deleteCloudMatch, deleteCloudPlayer, fetchCloudData, saveCloudMatch } from "./lib/cloud";
 import { formatDuration, formatNumber, formatPercent, parseDurationToSeconds, parseNumber } from "./lib/format";
-import { calculateHistoryMetrics, calculateSingleMatchMetrics } from "./lib/metrics";
+import { calculateHistoryMetrics, calculateSingleMatchMetrics, calculateZoneScore } from "./lib/metrics";
 import { extractMatchDraftFromText, recognizeImage } from "./lib/ocr";
 
 const emptyDraft: MatchDraft = {
@@ -35,6 +35,7 @@ export default function App() {
   const [matches, setMatches] = useState<MatchRecord[]>([]);
   const [players, setPlayers] = useState<string[]>([]);
   const [siteMetrics, setSiteMetrics] = useState<HistoryMetrics>(emptySiteMetrics);
+  const [adminDeleteEnabled, setAdminDeleteEnabled] = useState(false);
   const [selectedPlayerId, setSelectedPlayerId] = useState("");
   const [queryPlayerId, setQueryPlayerId] = useState("");
   const [imagePreview, setImagePreview] = useState("");
@@ -57,9 +58,15 @@ export default function App() {
 
   const activePlayerId = selectedPlayerId || queryPlayerId.trim() || draft.playerId.trim();
   const activeMatches = matches;
-  const latestMatch = activeMatches.at(-1) ?? null;
+  const latestMatch = activeMatches.length > 0 ? activeMatches[activeMatches.length - 1] : null;
   const latestMetrics = latestMatch ? calculateSingleMatchMetrics(latestMatch) : null;
   const historyMetrics = useMemo(() => calculateHistoryMetrics(activeMatches), [activeMatches]);
+  const latestZoneScore = useMemo(
+    () => (latestMatch ? calculateZoneScore(calculateHistoryMetrics([latestMatch]), siteMetrics) : null),
+    [latestMatch, siteMetrics],
+  );
+  const historyZoneScore = useMemo(() => calculateZoneScore(historyMetrics, siteMetrics), [historyMetrics, siteMetrics]);
+  const recentMatches = useMemo(() => activeMatches.slice(-10).reverse(), [activeMatches]);
   const validationError = validateDraft(draft);
 
   async function loadCloudData(playerId: string) {
@@ -90,6 +97,7 @@ export default function App() {
     setMatches(payload.matches);
     setPlayers(payload.players);
     setSiteMetrics(payload.siteMetrics);
+    setAdminDeleteEnabled(Boolean(payload.adminDeleteEnabled));
 
     if (preferredPlayerId) {
       setSelectedPlayerId(preferredPlayerId);
@@ -203,13 +211,40 @@ export default function App() {
       return;
     }
 
+    if (!adminDeleteEnabled) {
+      setCloudState({
+        status: "error",
+        message: "服务器未配置 ADMIN_DELETE_TOKEN，整档删除已禁用。",
+      });
+      return;
+    }
+
+    const confirmed = window.confirm(`确定删除 ${activePlayerId} 的整个玩家档案吗？这会移除该玩家全部单局记录。`);
+    if (!confirmed) {
+      return;
+    }
+
+    const adminToken = window.prompt("请输入管理员口令以删除整个玩家档案：");
+    if (adminToken === null) {
+      return;
+    }
+
+    const trimmedToken = adminToken.trim();
+    if (!trimmedToken) {
+      setCloudState({
+        status: "error",
+        message: "管理员口令不能为空。",
+      });
+      return;
+    }
+
     setCloudState({
       status: "saving",
       message: `正在删除 ${activePlayerId} 的云端档案...`,
     });
 
     try {
-      const payload = await deleteCloudPlayer(activePlayerId);
+      const payload = await deleteCloudPlayer(activePlayerId, trimmedToken);
       applyCloudPayload(payload, "");
       setSelectedPlayerId("");
       setQueryPlayerId("");
@@ -221,6 +256,37 @@ export default function App() {
       setCloudState({
         status: "error",
         message: error instanceof Error ? error.message : "删除云端档案失败。",
+      });
+    }
+  }
+
+  async function handleDeleteMatch(match: MatchRecord) {
+    const matchTime = new Date(match.createdAt).toLocaleString("zh-CN");
+    const confirmed = window.confirm(`确定删除 ${matchTime} 的这局记录吗？`);
+    if (!confirmed) {
+      return;
+    }
+
+    setCloudState({
+      status: "saving",
+      message: `正在删除 ${match.playerId} 的单局记录...`,
+    });
+
+    try {
+      const payload = await deleteCloudMatch(match.playerId, match.id);
+      applyCloudPayload(payload, payload.matches.length > 0 ? match.playerId : "");
+      if (payload.matches.length === 0) {
+        setSelectedPlayerId("");
+        setQueryPlayerId(match.playerId);
+      }
+      setCloudState({
+        status: "ready",
+        message: `已删除 ${match.playerId} 的 1 局记录，剩余 ${payload.matches.length} 局。`,
+      });
+    } catch (error) {
+      setCloudState({
+        status: "error",
+        message: error instanceof Error ? error.message : "删除单局记录失败。",
       });
     }
   }
@@ -384,6 +450,7 @@ export default function App() {
                   <MetricCard label="击倒转化率" value={formatPercent(latestMetrics.knockConversionRate, 1)} hint="击杀 / 击倒" />
                   <MetricCard label="纯击倒" value={String(latestMetrics.pureKnocks)} hint="击倒 - 击杀" />
                 </div>
+                {latestZoneScore ? <ZoneScoreCard title="本局区值评分" zoneScore={latestZoneScore} /> : null}
               </>
             ) : (
               <EmptyState title="还没有单局报告" body="先查询玩家档案，或上传截图保存一局云端数据。" />
@@ -397,13 +464,21 @@ export default function App() {
               <p className="eyebrow">Panel 03</p>
               <h2 id="history-title">个人历史档案</h2>
             </div>
-            <button type="button" className="ghost-button danger" disabled={!activePlayerId} onClick={handleClearPlayerHistory}>
+            <button
+              type="button"
+              className="ghost-button danger"
+              disabled={!activePlayerId || !adminDeleteEnabled}
+              title={adminDeleteEnabled ? "需要管理员口令" : "服务器未配置 ADMIN_DELETE_TOKEN，整档删除已禁用"}
+              onClick={handleClearPlayerHistory}
+            >
               删除该玩家云端档案
             </button>
           </div>
 
           {activeMatches.length > 0 ? (
             <>
+              <ZoneScoreCard title="历史区值评分" zoneScore={historyZoneScore} />
+
               <div className="summary-grid">
                 <MetricCard label="场均伤害" value={formatNumber(historyMetrics.avgDamage, 1)} hint="全部历史" />
                 <MetricCard label="场均击杀" value={formatNumber(historyMetrics.avgKills, 2)} hint="全部历史" />
@@ -439,6 +514,12 @@ export default function App() {
                 </ChartPanel>
                 <RadarNotes playerMetrics={historyMetrics} siteMetrics={siteMetrics} />
               </div>
+
+              <RecentMatchesList
+                matches={recentMatches}
+                onDeleteMatch={handleDeleteMatch}
+                isDeleting={cloudState.status === "saving"}
+              />
             </>
           ) : (
             <EmptyState title="这个 ID 暂无云端档案" body="输入玩家 ID 查询，或保存一局数据后自动创建该玩家档案。" />
@@ -483,6 +564,97 @@ function EmptyState({ title, body }: { title: string; body: string }) {
       <strong>{title}</strong>
       <p>{body}</p>
     </div>
+  );
+}
+
+function ZoneScoreCard({ title, zoneScore }: { title: string; zoneScore: ZoneScore }) {
+  const highlightedComponents = zoneScore.components
+    .slice()
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 3);
+
+  return (
+    <section className="zone-score-card" aria-label={title}>
+      <div className="zone-score-main">
+        <div>
+          <span>{title}</span>
+          <strong>{zoneScore.score}</strong>
+          <small>/ 100</small>
+        </div>
+        <b>{zoneScore.title}</b>
+      </div>
+      <p>{zoneScore.explanation}</p>
+      {zoneScore.sampleWarning ? <small className="zone-score-warning">{zoneScore.sampleWarning}</small> : null}
+      {highlightedComponents.length > 0 ? (
+        <div className="zone-score-components" aria-label="区值评分主要加分项">
+          {highlightedComponents.map((component) => (
+            <span key={component.label}>
+              {component.label} {component.score}
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function RecentMatchesList({
+  matches,
+  onDeleteMatch,
+  isDeleting,
+}: {
+  matches: MatchRecord[];
+  onDeleteMatch: (match: MatchRecord) => void | Promise<void>;
+  isDeleting: boolean;
+}) {
+  return (
+    <section className="recent-matches" aria-labelledby="recent-matches-title">
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">Match Log</p>
+          <h3 id="recent-matches-title">最近对局</h3>
+        </div>
+        <span>最多显示最近 10 局</span>
+      </div>
+
+      <div className="match-list">
+        {matches.map((match) => (
+          <article className="match-row" key={match.id}>
+            <time dateTime={match.createdAt}>{new Date(match.createdAt).toLocaleString("zh-CN")}</time>
+            <dl className="match-stats">
+              <div>
+                <dt>伤害</dt>
+                <dd>{formatNumber(match.damage)}</dd>
+              </div>
+              <div>
+                <dt>击杀</dt>
+                <dd>{match.kills}</dd>
+              </div>
+              <div>
+                <dt>助攻</dt>
+                <dd>{match.assists}</dd>
+              </div>
+              <div>
+                <dt>击倒</dt>
+                <dd>{match.knocks}</dd>
+              </div>
+              <div>
+                <dt>存活</dt>
+                <dd>{formatDuration(match.survivalSeconds)}</dd>
+              </div>
+            </dl>
+            <button
+              type="button"
+              className="ghost-button danger match-delete-button"
+              disabled={isDeleting}
+              onClick={() => void onDeleteMatch(match)}
+            >
+              删除单局
+            </button>
+          </article>
+        ))}
+      </div>
+    </section>
   );
 }
 

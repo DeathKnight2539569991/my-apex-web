@@ -39,6 +39,19 @@ export default async function handler(request, response) {
         return sendJson(response, 400, { error: "playerId is required." });
       }
 
+      const matchId = getMatchId(request);
+      if (matchId) {
+        return sendJson(response, 200, await deletePlayerMatch(playerId, matchId));
+      }
+
+      if (!isAdminDeleteEnabled()) {
+        return sendJson(response, 403, { error: "Whole-player deletion is disabled because ADMIN_DELETE_TOKEN is not configured." });
+      }
+
+      if (!isValidAdminDeleteToken(request)) {
+        return sendJson(response, 403, { error: "Invalid administrator delete token." });
+      }
+
       await redis(["DEL", getPlayerKey(playerId)]);
       await redis(["SREM", PLAYERS_KEY, playerId]);
 
@@ -48,7 +61,8 @@ export default async function handler(request, response) {
     response.setHeader("Allow", "GET, POST, DELETE");
     return sendJson(response, 405, { error: "Method not allowed." });
   } catch (error) {
-    return sendJson(response, 500, {
+    const statusCode = Number.isInteger(error?.statusCode) ? error.statusCode : 500;
+    return sendJson(response, statusCode, {
       error: error instanceof Error ? error.message : "Unexpected cloud API error.",
     });
   }
@@ -63,7 +77,29 @@ async function getCloudPayload(playerId) {
     matches,
     players,
     siteMetrics: calculateHistoryMetrics(allMatches),
+    adminDeleteEnabled: isAdminDeleteEnabled(),
   };
+}
+
+async function deletePlayerMatch(playerId, matchId) {
+  const existingMatches = await getPlayerMatches(playerId);
+  const nextMatches = existingMatches.filter((match) => match.id !== matchId);
+
+  if (nextMatches.length === existingMatches.length) {
+    const error = new Error("Match record not found.");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  if (nextMatches.length > 0) {
+    await redis(["SET", getPlayerKey(playerId), JSON.stringify(nextMatches)]);
+    await redis(["SADD", PLAYERS_KEY, playerId]);
+  } else {
+    await redis(["DEL", getPlayerKey(playerId)]);
+    await redis(["SREM", PLAYERS_KEY, playerId]);
+  }
+
+  return getCloudPayload(playerId);
 }
 
 async function getPlayers() {
@@ -212,9 +248,36 @@ function isCloudConfigured() {
   );
 }
 
+function isAdminDeleteEnabled() {
+  return Boolean(process.env.ADMIN_DELETE_TOKEN);
+}
+
+function isValidAdminDeleteToken(request) {
+  const expectedToken = process.env.ADMIN_DELETE_TOKEN;
+  const providedToken = getHeader(request, "x-admin-delete-token");
+  return Boolean(expectedToken) && providedToken === expectedToken;
+}
+
 function getPlayerId(request) {
+  return getSearchParam(request, "playerId");
+}
+
+function getMatchId(request) {
+  return getSearchParam(request, "matchId");
+}
+
+function getSearchParam(request, key) {
   const url = new URL(request.url, `https://${request.headers.host ?? "localhost"}`);
-  return url.searchParams.get("playerId")?.trim() ?? "";
+  return url.searchParams.get(key)?.trim() ?? "";
+}
+
+function getHeader(request, name) {
+  if (typeof request.headers?.get === "function") {
+    return request.headers.get(name) ?? "";
+  }
+
+  const value = request.headers?.[name.toLowerCase()] ?? request.headers?.[name];
+  return Array.isArray(value) ? (value[0] ?? "") : (value ?? "");
 }
 
 async function readJsonBody(request) {

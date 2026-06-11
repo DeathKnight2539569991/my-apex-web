@@ -59,8 +59,25 @@ export type HistoryMetrics = {
   };
 };
 
+export type ZoneScoreComponent = {
+  label: string;
+  score: number;
+  weight: number;
+  playerValue: number | null;
+  siteValue: number | null;
+};
+
+export type ZoneScore = {
+  score: number;
+  title: string;
+  explanation: string;
+  sampleWarning: string | null;
+  components: ZoneScoreComponent[];
+};
+
 export type CloudDataResponse = {
   matches: MatchRecord[];
   players: string[];
   siteMetrics: HistoryMetrics;
+  adminDeleteEnabled: boolean;
 };

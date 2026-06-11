@@ -15,13 +15,22 @@ export async function saveCloudMatch(match: MatchRecord): Promise<CloudDataRespo
   });
 }
 
-export async function deleteCloudPlayer(playerId: string): Promise<CloudDataResponse> {
+export async function deleteCloudPlayer(playerId: string, adminToken: string): Promise<CloudDataResponse> {
   return requestCloud(`/api/matches?playerId=${encodeURIComponent(playerId)}`, {
+    method: "DELETE",
+    headers: {
+      "X-Admin-Delete-Token": adminToken,
+    },
+  });
+}
+
+export async function deleteCloudMatch(playerId: string, matchId: string): Promise<CloudDataResponse> {
+  return requestCloud(`/api/matches?playerId=${encodeURIComponent(playerId)}&matchId=${encodeURIComponent(matchId)}`, {
     method: "DELETE",
   });
 }
 
-async function requestCloud(path: string, init?: RequestInit) {
+async function requestCloud(path: string, init?: RequestInit): Promise<CloudDataResponse> {
   const response = await fetch(path, init);
   const payload = await response.json().catch(() => ({}));
 
@@ -29,5 +38,23 @@ async function requestCloud(path: string, init?: RequestInit) {
     throw new Error(payload.error ?? "云端请求失败。");
   }
 
-  return payload;
+  if (!isCloudDataResponse(payload)) {
+    throw new Error("云端响应格式异常，请确认 /api/matches 已可用。");
+  }
+
+  return {
+    ...payload,
+    adminDeleteEnabled: Boolean(payload.adminDeleteEnabled),
+  };
+}
+
+function isCloudDataResponse(value: unknown): value is CloudDataResponse {
+  return (
+    Boolean(value) &&
+    typeof value === "object" &&
+    Array.isArray((value as CloudDataResponse).matches) &&
+    Array.isArray((value as CloudDataResponse).players) &&
+    Boolean((value as CloudDataResponse).siteMetrics) &&
+    typeof (value as CloudDataResponse).siteMetrics === "object"
+  );
 }

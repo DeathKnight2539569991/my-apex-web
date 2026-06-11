@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { MatchRecord } from "../types";
 import { formatDuration, parseDurationToSeconds, parseNumber } from "./format";
-import { calculateHistoryMetrics, calculateSingleMatchMetrics } from "./metrics";
+import { calculateHistoryMetrics, calculateSingleMatchMetrics, calculateZoneScore } from "./metrics";
 import { extractMatchDraftFromText } from "./ocr";
 
 const baseMatch: MatchRecord = {
@@ -105,5 +105,34 @@ describe("history metrics", () => {
     expect(metrics.historicalKnockConversionRate).toBeCloseTo(16 / 28, 4);
     expect(metrics.damageStability).not.toBeNull();
     expect(metrics.radar.avgDamage).toBe(100);
+  });
+});
+
+describe("zone score", () => {
+  it("returns an empty state when the player has no matches", () => {
+    const score = calculateZoneScore(calculateHistoryMetrics([]), calculateHistoryMetrics([]));
+
+    expect(score.score).toBe(0);
+    expect(score.title).toBe("暂无评分");
+    expect(score.components).toHaveLength(0);
+  });
+
+  it("scores player history against site averages", () => {
+    const siteMetrics = calculateHistoryMetrics([
+      { ...baseMatch, id: "site-1", kills: 1, assists: 1, knocks: 2, damage: 500, survivalSeconds: 600 },
+      { ...baseMatch, id: "site-2", kills: 1, assists: 0, knocks: 1, damage: 450, survivalSeconds: 540 },
+      { ...baseMatch, id: "site-3", kills: 2, assists: 1, knocks: 3, damage: 800, survivalSeconds: 780 },
+    ]);
+    const playerMetrics = calculateHistoryMetrics([
+      { ...baseMatch, id: "player-1", kills: 5, assists: 3, knocks: 7, damage: 1800, survivalSeconds: 1000 },
+      { ...baseMatch, id: "player-2", kills: 4, assists: 2, knocks: 6, damage: 1600, survivalSeconds: 900 },
+      { ...baseMatch, id: "player-3", kills: 3, assists: 4, knocks: 5, damage: 1500, survivalSeconds: 880 },
+    ]);
+
+    const score = calculateZoneScore(playerMetrics, siteMetrics);
+
+    expect(score.score).toBeGreaterThan(70);
+    expect(score.components).toHaveLength(8);
+    expect(score.explanation).toContain("网站平均");
   });
 });

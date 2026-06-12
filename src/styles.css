@@ -304,6 +304,160 @@ button:disabled {
   font-size: 14px;
 }
 
+.screen-capture-dock {
+  position: relative;
+  display: grid;
+  gap: 12px;
+  margin: 12px 0;
+  border: 1px solid rgba(244, 207, 169, 0.22);
+  border-radius: 8px;
+  background: rgba(11, 11, 10, 0.58);
+  padding: 12px;
+  overflow: hidden;
+}
+
+.screen-capture-heading,
+.capture-list-heading,
+.capture-shot-meta,
+.capture-shot-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.screen-capture-heading h3,
+.capture-list-heading h4 {
+  margin: 0;
+  color: #fff3e2;
+}
+
+.screen-capture-heading h3 {
+  font-size: 17px;
+}
+
+.capture-list-heading h4 {
+  font-size: 15px;
+}
+
+.capture-badge,
+.capture-list-heading span {
+  border: 1px solid rgba(214, 195, 170, 0.22);
+  border-radius: 999px;
+  background: rgba(24, 23, 21, 0.82);
+  color: #d1c4b4;
+  padding: 7px 10px;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.capture-badge.capturing {
+  border-color: rgba(93, 224, 230, 0.32);
+  color: #5de0e6;
+}
+
+.capture-badge.error {
+  border-color: rgba(211, 68, 48, 0.52);
+  color: #ffb29e;
+}
+
+.capture-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.capture-actions .primary-button,
+.capture-actions .ghost-button {
+  width: auto;
+  margin-top: 0;
+}
+
+.capture-status {
+  display: grid;
+  gap: 6px;
+  border: 1px solid rgba(224, 210, 190, 0.15);
+  border-radius: 7px;
+  background: rgba(32, 30, 27, 0.62);
+  color: #d1c4b4;
+  padding: 10px 12px;
+  font-size: 14px;
+}
+
+.capture-status small {
+  color: #9f9180;
+}
+
+.capture-status.capturing {
+  border-color: rgba(93, 224, 230, 0.24);
+}
+
+.capture-status.error {
+  border-color: rgba(211, 68, 48, 0.52);
+  color: #ffb29e;
+}
+
+.capture-video {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.capture-empty {
+  border: 1px dashed rgba(214, 195, 170, 0.22);
+  border-radius: 7px;
+  color: #cbbba8;
+  padding: 16px;
+  text-align: center;
+}
+
+.capture-shot-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 10px;
+}
+
+.capture-shot-card {
+  display: grid;
+  gap: 9px;
+  border: 1px solid rgba(224, 210, 190, 0.16);
+  border-radius: 8px;
+  background: rgba(18, 18, 17, 0.76);
+  padding: 9px;
+}
+
+.capture-shot-card img {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border: 1px solid rgba(224, 210, 190, 0.13);
+  border-radius: 6px;
+  background: #050505;
+  object-fit: cover;
+}
+
+.capture-shot-meta {
+  align-items: baseline;
+}
+
+.capture-shot-meta strong {
+  color: #fff3e2;
+  font-size: 13px;
+}
+
+.capture-shot-meta span {
+  color: #cbbba8;
+  font-size: 12px;
+  text-align: right;
+}
+
+.capture-shot-actions .ghost-button {
+  flex: 1;
+  padding: 8px 9px;
+}
+
 .ocr-status {
   display: flex;
   align-items: center;
@@ -791,5 +945,24 @@ button:disabled {
 
   .match-delete-button {
     width: 100%;
+  }
+
+  .capture-actions,
+  .capture-shot-actions,
+  .screen-capture-heading,
+  .capture-list-heading,
+  .capture-shot-meta {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .capture-actions .primary-button,
+  .capture-actions .ghost-button,
+  .capture-shot-actions .ghost-button {
+    width: 100%;
+  }
+
+  .capture-shot-meta span {
+    text-align: left;
   }
 }

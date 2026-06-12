@@ -7,6 +7,7 @@ import { deleteCloudMatch, deleteCloudPlayer, fetchCloudData, saveCloudMatch } f
 import { formatDuration, formatNumber, formatPercent, parseDurationToSeconds, parseNumber } from "./lib/format";
 import { calculateHistoryMetrics, calculateSingleMatchMetrics, calculateZoneScore } from "./lib/metrics";
 import { extractMatchDraftFromText, recognizeImage } from "./lib/ocr";
+import ScreenCaptureDock from "./components/ScreenCaptureDock";
 
 const emptyDraft: MatchDraft = {
   playerId: "",
@@ -452,6 +453,8 @@ export default function App() {
             {imageQueue.length > 0 ? (
               <div className="queue-status">待处理图片：{imageQueue.length} 张。保存当前校准后会自动进入下一张，也可以直接粘贴图片加入队列。</div>
             ) : null}
+
+            <ScreenCaptureDock onRecognizeImage={(file) => enqueueImages([file])} />
 
             <div className={`ocr-status ${ocrState.status}`}>
               <span>{ocrState.message}</span>

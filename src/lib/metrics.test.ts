@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { MatchRecord, PlayerMetricsEntry } from "../types";
+import type { HistoryMetrics, MatchRecord, PlayerMetricsEntry } from "../types";
 import { formatDuration, parseDurationToSeconds, parseNumber } from "./format";
 import { calculateHistoryMetrics, calculateSingleMatchMetrics, calculateZoneScore } from "./metrics";
 import { extractMatchDraftFromText } from "./ocr";
@@ -117,126 +117,143 @@ describe("zone score", () => {
     expect(score.components).toHaveLength(0);
   });
 
-  it("scores player history against site averages", () => {
-    const siteMetrics = calculateHistoryMetrics([
-      { ...baseMatch, id: "site-1", kills: 1, assists: 1, knocks: 2, damage: 500, survivalSeconds: 600 },
-      { ...baseMatch, id: "site-2", kills: 1, assists: 0, knocks: 1, damage: 450, survivalSeconds: 540 },
-      { ...baseMatch, id: "site-3", kills: 2, assists: 1, knocks: 3, damage: 800, survivalSeconds: 780 },
-    ]);
-    const playerMetrics = calculateHistoryMetrics([
-      { ...baseMatch, id: "player-1", kills: 5, assists: 3, knocks: 7, damage: 1800, survivalSeconds: 1000 },
-      { ...baseMatch, id: "player-2", kills: 4, assists: 2, knocks: 6, damage: 1600, survivalSeconds: 900 },
-      { ...baseMatch, id: "player-3", kills: 3, assists: 4, knocks: 5, damage: 1500, survivalSeconds: 880 },
-    ]);
+  it("keeps an average player in the normal human tier", () => {
+    const siteMetrics = createSyntheticHistoryMetrics(1);
+    const score = calculateZoneScore(createSyntheticHistoryMetrics(1), siteMetrics);
 
-    const score = calculateZoneScore(playerMetrics, siteMetrics);
-
-    expect(score.score).toBeGreaterThan(70);
+    expect(score.score).toBe(50);
+    expect(score.title).toBe("正常人类😀");
     expect(score.components).toHaveLength(8);
-    expect(score.explanation).toContain("网站平均");
+    expect(score.components.map((component) => [component.label, component.weight])).toEqual([
+      ["场均伤害", 30],
+      ["历史 DPM", 15],
+      ["场均击杀", 14],
+      ["场均击倒", 12],
+      ["输出稳定", 10],
+      ["终结转化", 8],
+      ["场均助攻", 6],
+      ["场均存活", 5],
+    ]);
+    expect(score.explanation).toContain("正常人类水平");
   });
 
-  it("keeps the numeric score stable when ranked title context is provided", () => {
-    const { playerMetrics, siteMetrics } = createRankingScenario(5);
-    const entry = playerMetrics[2];
+  it("puts clearly above-average players into the carry tier", () => {
+    const score = calculateZoneScore(createSyntheticHistoryMetrics(1.65), createSyntheticHistoryMetrics(1));
 
-    const absoluteScore = calculateZoneScore(entry.metrics, siteMetrics);
-    const rankedScore = calculateZoneScore(entry.metrics, siteMetrics, {
-      playerId: entry.playerId,
+    expect(score.score).toBeGreaterThanOrEqual(72);
+    expect(score.score).toBeLessThan(88);
+    expect(score.title).toBe("团队大腿🥵");
+  });
+
+  it("puts elite players into the damage-team tier", () => {
+    const score = calculateZoneScore(createSyntheticHistoryMetrics(2.3), createSyntheticHistoryMetrics(1));
+
+    expect(score.score).toBeGreaterThanOrEqual(88);
+    expect(score.title).toBe("伤害团队😭");
+  });
+
+  it("puts below-average players into the occasional-throw tier", () => {
+    const score = calculateZoneScore(createSyntheticHistoryMetrics(0.7), createSyntheticHistoryMetrics(1));
+
+    expect(score.score).toBeLessThan(50);
+    expect(score.score).toBeGreaterThanOrEqual(30);
+    expect(score.title).toBe("偶尔犯病😒");
+  });
+
+  it("puts very low players into the bottom tier", () => {
+    const score = calculateZoneScore(createSyntheticHistoryMetrics(0.5), createSyntheticHistoryMetrics(1));
+
+    expect(score.score).toBeLessThan(30);
+    expect(score.title).toBe("究极大区🤣");
+  });
+
+  it("does not let leaderboard context change the score title", () => {
+    const siteMetrics = createSyntheticHistoryMetrics(1);
+    const targetMetrics = createSyntheticHistoryMetrics(0.7);
+    const playerMetrics: PlayerMetricsEntry[] = [
+      { playerId: "target-player", metrics: targetMetrics },
+      { playerId: "elite-player", metrics: createSyntheticHistoryMetrics(2.3) },
+      { playerId: "average-player", metrics: createSyntheticHistoryMetrics(1) },
+      { playerId: "low-player", metrics: createSyntheticHistoryMetrics(0.5) },
+    ];
+
+    const absoluteScore = calculateZoneScore(targetMetrics, siteMetrics);
+    const rankedScore = calculateZoneScore(targetMetrics, siteMetrics, {
+      playerId: "target-player",
       playerMetrics,
     });
 
     expect(rankedScore.score).toBe(absoluteScore.score);
+    expect(rankedScore.title).toBe(absoluteScore.title);
+    expect(rankedScore.title).toBe("偶尔犯病😒");
   });
 
-  it("uses only the top ranked titles for two to four cloud players", () => {
-    const { playerMetrics, siteMetrics } = createRankingScenario(4);
+  it("keeps missing nullable metrics neutral while zero values still score low", () => {
+    const siteMetrics = createSyntheticHistoryMetrics(1);
+    const playerMetrics: HistoryMetrics = {
+      ...createSyntheticHistoryMetrics(1),
+      avgDamage: 0,
+      historicalKnockConversionRate: null,
+      damageStability: null,
+    };
 
-    const titles = playerMetrics.map((entry) =>
-      calculateZoneScore(entry.metrics, siteMetrics, {
-        playerId: entry.playerId,
-        playerMetrics,
-      }).title,
-    );
+    const score = calculateZoneScore(playerMetrics, siteMetrics);
+    const damage = score.components.find((component) => component.label === "场均伤害");
+    const conversion = score.components.find((component) => component.label === "终结转化");
+    const stability = score.components.find((component) => component.label === "输出稳定");
 
-    expect(titles).toEqual(["究极大区 🤣", "团队大腿🥵", "正常人类😀", "偶尔犯病😒"]);
-    expect(titles).not.toContain("伤害团队😭");
-  });
-
-  it("assigns one title per rank when there are five cloud players", () => {
-    const { playerMetrics, siteMetrics } = createRankingScenario(5);
-
-    const titles = playerMetrics.map((entry) =>
-      calculateZoneScore(entry.metrics, siteMetrics, {
-        playerId: entry.playerId,
-        playerMetrics,
-      }).title,
-    );
-
-    expect(titles).toEqual(["究极大区 🤣", "团队大腿🥵", "正常人类😀", "偶尔犯病😒", "伤害团队😭"]);
-  });
-
-  it("splits ranked titles proportionally when there are more than five cloud players", () => {
-    const { playerMetrics, siteMetrics } = createRankingScenario(10);
-    const titles = playerMetrics.map((entry) =>
-      calculateZoneScore(entry.metrics, siteMetrics, {
-        playerId: entry.playerId,
-        playerMetrics,
-      }).title,
-    );
-
-    expect(countByTitle(titles)).toEqual({
-      "究极大区 🤣": 2,
-      "团队大腿🥵": 2,
-      "正常人类😀": 2,
-      "偶尔犯病😒": 2,
-      "伤害团队😭": 2,
-    });
-  });
-
-  it("falls back to absolute score titles when the current player is not ranked", () => {
-    const { playerMetrics, siteMetrics } = createRankingScenario(5);
-    const entry = playerMetrics[0];
-
-    const absoluteScore = calculateZoneScore(entry.metrics, siteMetrics);
-    const missingRankScore = calculateZoneScore(entry.metrics, siteMetrics, {
-      playerId: "missing-player",
-      playerMetrics,
-    });
-
-    expect(missingRankScore.title).toBe(absoluteScore.title);
+    expect(damage?.score).toBe(0);
+    expect(conversion?.score).toBe(50);
+    expect(stability?.score).toBe(50);
   });
 });
 
-function createRankingScenario(playerCount: number) {
-  const matches = Array.from({ length: playerCount }, (_, index) => createRankedMatch(index));
-  const siteMetrics = calculateHistoryMetrics(matches);
-  const playerMetrics: PlayerMetricsEntry[] = matches.map((match) => ({
-    playerId: match.playerId,
-    metrics: calculateHistoryMetrics([match]),
-  }));
-
-  return { matches, playerMetrics, siteMetrics };
-}
-
-function createRankedMatch(index: number): MatchRecord {
-  const strength = 20 - index;
+function createSyntheticHistoryMetrics(ratio: number): HistoryMetrics {
+  const matchCount = 10;
+  const avgDamage = 600 * ratio;
+  const avgKills = 1.2 * ratio;
+  const avgAssists = 1 * ratio;
+  const avgKnocks = 2.4 * ratio;
+  const avgSurvivalSeconds = 600 * ratio;
+  const totalDamage = avgDamage * matchCount;
+  const totalKills = avgKills * matchCount;
+  const totalAssists = avgAssists * matchCount;
+  const totalKnocks = avgKnocks * matchCount;
+  const totalPureKnocks = Math.max(totalKnocks - totalKills, 0);
+  const totalSurvivalSeconds = avgSurvivalSeconds * matchCount;
+  const historicalKnockConversionRate = 0.4 * ratio;
+  const damageStability = 40 * ratio;
+  const distributionTotal = totalKills + totalAssists + totalPureKnocks;
 
   return {
-    ...baseMatch,
-    id: `ranked-${index + 1}`,
-    playerId: `player-${String(index + 1).padStart(2, "0")}`,
-    kills: strength,
-    assists: Math.floor(strength / 2),
-    knocks: strength + 3,
-    damage: strength * 120,
-    survivalSeconds: 720,
+    matchCount,
+    totalDamage,
+    totalKills,
+    totalAssists,
+    totalKnocks,
+    totalPureKnocks,
+    totalSurvivalSeconds,
+    avgDamage,
+    avgKills,
+    avgAssists,
+    avgKnocks,
+    avgSurvivalSeconds,
+    historicalDpm: 90 * ratio,
+    historicalDamagePerKill: totalKills > 0 ? totalDamage / totalKills : null,
+    historicalKnockConversionRate,
+    damageStability,
+    finishDistribution: {
+      kills: totalKills / distributionTotal,
+      assists: totalAssists / distributionTotal,
+      pureKnocks: totalPureKnocks / distributionTotal,
+    },
+    radar: {
+      avgDamage: 0,
+      avgKills: 0,
+      avgSurvivalTime: 0,
+      avgKnocks: 0,
+      finishConversion: historicalKnockConversionRate * 100,
+      outputStability: damageStability,
+    },
   };
-}
-
-function countByTitle(titles: string[]) {
-  return titles.reduce<Record<string, number>>((counts, title) => {
-    counts[title] = (counts[title] ?? 0) + 1;
-    return counts;
-  }, {});
 }

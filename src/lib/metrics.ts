@@ -19,7 +19,7 @@ const ZONE_SCORE_BASELINES = {
   damageStability: 55,
 };
 
-const ZONE_SCORE_TITLES = ["究极大区 🤣", "团队大腿🥵", "正常人类😀", "偶尔犯病😒", "伤害团队😭"];
+const ZONE_SCORE_TITLES = ["伤害团队😭", "团队大腿🥵", "正常人类😀", "偶尔犯病😒", "究极大区🤣"];
 
 type ZoneScoreRankingContext = {
   playerId: string;
@@ -45,13 +45,13 @@ export function calculateSingleMatchMetrics(match: MatchRecord): SingleMatchMetr
 export function calculateZoneScore(
   playerMetrics: HistoryMetrics,
   siteMetrics: HistoryMetrics,
-  rankingContext?: ZoneScoreRankingContext,
+  _rankingContext?: ZoneScoreRankingContext,
 ): ZoneScore {
   if (playerMetrics.matchCount === 0) {
     return {
       score: 0,
       title: "暂无评分",
-      explanation: "还没有可用于计算区值评分的对局记录。",
+      explanation: "还没有可用于计算评分的对局记录。",
       sampleWarning: null,
       components: [],
     };
@@ -65,12 +65,12 @@ export function calculateZoneScore(
     siteMetrics.matchCount === 0
       ? "网站平均暂无样本，当前评分使用基础基准临时估算。"
       : siteMetrics.matchCount < 5
-        ? "网站平均样本偏少，区值评分会随着更多对局进入云端而更稳定。"
+        ? "网站平均样本偏少，评分会随着更多对局进入云端而更稳定。"
         : null;
 
   return {
     score,
-    title: getRankedZoneScoreTitle(rankingContext, siteMetrics) ?? getZoneScoreTitle(score),
+    title: getZoneScoreTitle(score),
     explanation: createZoneScoreExplanation(score, strongest, weakest),
     sampleWarning,
     components,
@@ -160,37 +160,38 @@ function normalize(value: number, limit: number) {
 
 function createZoneScoreComponents(playerMetrics: HistoryMetrics, siteMetrics: HistoryMetrics): ZoneScoreComponent[] {
   return [
-    createZoneScoreComponent("场均伤害", playerMetrics.avgDamage, siteMetrics.avgDamage, ZONE_SCORE_BASELINES.avgDamage, 28),
-    createZoneScoreComponent("历史 DPM", playerMetrics.historicalDpm, siteMetrics.historicalDpm, ZONE_SCORE_BASELINES.historicalDpm, 18),
-    createZoneScoreComponent("场均击杀", playerMetrics.avgKills, siteMetrics.avgKills, ZONE_SCORE_BASELINES.avgKills, 16),
-    createZoneScoreComponent("场均助攻", playerMetrics.avgAssists, siteMetrics.avgAssists, ZONE_SCORE_BASELINES.avgAssists, 8),
+    createZoneScoreComponent("场均伤害", playerMetrics.avgDamage, siteMetrics.avgDamage, ZONE_SCORE_BASELINES.avgDamage, 30),
+    createZoneScoreComponent("历史 DPM", playerMetrics.historicalDpm, siteMetrics.historicalDpm, ZONE_SCORE_BASELINES.historicalDpm, 15),
+    createZoneScoreComponent("场均击杀", playerMetrics.avgKills, siteMetrics.avgKills, ZONE_SCORE_BASELINES.avgKills, 14),
     createZoneScoreComponent("场均击倒", playerMetrics.avgKnocks, siteMetrics.avgKnocks, ZONE_SCORE_BASELINES.avgKnocks, 12),
     createZoneScoreComponent(
-      "场均存活",
-      playerMetrics.avgSurvivalSeconds,
-      siteMetrics.avgSurvivalSeconds,
-      ZONE_SCORE_BASELINES.avgSurvivalSeconds,
-      8,
+      "输出稳定",
+      playerMetrics.damageStability,
+      siteMetrics.damageStability,
+      ZONE_SCORE_BASELINES.damageStability,
+      10,
     ),
     createZoneScoreComponent(
       "终结转化",
       playerMetrics.historicalKnockConversionRate,
       siteMetrics.historicalKnockConversionRate,
       ZONE_SCORE_BASELINES.knockConversionRate,
-      5,
+      8,
     ),
+    createZoneScoreComponent("场均助攻", playerMetrics.avgAssists, siteMetrics.avgAssists, ZONE_SCORE_BASELINES.avgAssists, 6),
     createZoneScoreComponent(
-      "输出稳定",
-      playerMetrics.damageStability,
-      siteMetrics.damageStability,
-      ZONE_SCORE_BASELINES.damageStability,
+      "场均存活",
+      playerMetrics.avgSurvivalSeconds,
+      siteMetrics.avgSurvivalSeconds,
+      ZONE_SCORE_BASELINES.avgSurvivalSeconds,
       5,
     ),
   ];
 }
 
 function calculateZoneScoreValue(components: ZoneScoreComponent[]) {
-  return Math.round(components.reduce((total, component) => total + component.score * component.weight, 0) / 100);
+  const weightedScore = components.reduce((total, component) => total + component.score * component.weight, 0) / 100;
+  return Math.round(clamp(weightedScore, 0, 100));
 }
 
 function createZoneScoreComponent(
@@ -210,61 +211,33 @@ function createZoneScoreComponent(
 }
 
 function compareToSiteAverage(playerValue: number | null, siteValue: number | null, fallbackSiteValue: number) {
-  if (playerValue === null) {
+  if (playerValue === null || !Number.isFinite(playerValue)) {
     return 50;
   }
 
-  const comparisonBase = siteValue !== null && siteValue > 0 ? siteValue : fallbackSiteValue;
-  if (comparisonBase <= 0) {
+  const comparisonBase = siteValue !== null && Number.isFinite(siteValue) && siteValue > 0 ? siteValue : fallbackSiteValue;
+  if (!Number.isFinite(comparisonBase) || comparisonBase <= 0) {
     return 50;
   }
 
-  const ratio = playerValue / comparisonBase;
-  return Math.round(clamp(50 + (ratio - 1) * 35, 0, 100));
-}
-
-function getRankedZoneScoreTitle(rankingContext: ZoneScoreRankingContext | undefined, siteMetrics: HistoryMetrics) {
-  const playerId = rankingContext?.playerId.trim();
-  if (!playerId || !rankingContext || rankingContext.playerMetrics.length === 0) {
-    return null;
-  }
-
-  const rankedPlayers = rankingContext.playerMetrics
-    .filter((entry) => entry.metrics.matchCount > 0)
-    .map((entry) => ({
-      playerId: entry.playerId,
-      score: calculateZoneScoreValue(createZoneScoreComponents(entry.metrics, siteMetrics)),
-    }))
-    .sort((a, b) => b.score - a.score || a.playerId.localeCompare(b.playerId));
-
-  const rank = rankedPlayers.findIndex((entry) => entry.playerId === playerId);
-  if (rank === -1) {
-    return null;
-  }
-
-  const playerCount = rankedPlayers.length;
-  const tierIndex =
-    playerCount < ZONE_SCORE_TITLES.length
-      ? rank
-      : Math.min(Math.floor((rank * ZONE_SCORE_TITLES.length) / playerCount), ZONE_SCORE_TITLES.length - 1);
-
-  return ZONE_SCORE_TITLES[tierIndex] ?? null;
+  const ratio = Math.max(playerValue, 0) / comparisonBase;
+  return Math.round(clamp(50 + Math.log(ratio) * 46, 0, 100));
 }
 
 function getZoneScoreTitle(score: number) {
-  if (score >= 92) {
+  if (score >= 88) {
     return ZONE_SCORE_TITLES[0];
   }
 
-  if (score >= 78) {
+  if (score >= 72) {
     return ZONE_SCORE_TITLES[1];
   }
 
-  if (score >= 58) {
+  if (score >= 50) {
     return ZONE_SCORE_TITLES[2];
   }
 
-  if (score >= 38) {
+  if (score >= 30) {
     return ZONE_SCORE_TITLES[3];
   }
 
@@ -273,13 +246,17 @@ function getZoneScoreTitle(score: number) {
 
 function createZoneScoreExplanation(score: number, strongest: ZoneScoreComponent, weakest: ZoneScoreComponent) {
   const trend =
-    score >= 78
-      ? "整体高于网站平均"
-      : score >= 58
-        ? "整体接近网站平均"
-        : "整体低于网站平均，需要靠下一局把风评打回来";
+    score >= 88
+      ? "火力过于夸张，已经进入伤害团队级别"
+      : score >= 72
+        ? "整体明显高于网站平均，是队伍里的稳定大腿"
+        : score >= 50
+          ? "整体接近网站平均，属于正常人类水平"
+          : score >= 30
+            ? "整体略低于网站平均，偶尔会有犯病表现"
+            : "多项数据明显低于网站平均，需要下一局把风评打回来";
 
-  return `${trend}；${strongest.label}最能拉分，${weakest.label}目前拖后腿。评分按玩家历史均值与网站平均的相对表现加权得到。`;
+  return `${trend}；${strongest.label}最能拉分，${weakest.label}目前拖后腿。评分根据玩家历史均值与网站平均的相对表现加权得到。`;
 }
 
 function sum<T>(items: T[], selector: (item: T) => number) {

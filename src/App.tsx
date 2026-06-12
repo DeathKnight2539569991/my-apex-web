@@ -2,8 +2,24 @@ import { useEffect, useMemo, useState, type CSSProperties, type FormEvent, type 
 import ReactECharts from "echarts-for-react";
 import type { EChartsOption } from "echarts";
 import backgroundImage from "../6b68b6d7-178e-4bdc-9f5c-ed94e82b894b.png";
-import type { CloudDataResponse, HistoryMetrics, MatchDraft, MatchRecord, PlayerMetricsEntry, ZoneScore } from "./types";
-import { deleteCloudMatch, deleteCloudPlayer, fetchCloudData, saveCloudMatch } from "./lib/cloud";
+import type {
+  CloudDataResponse,
+  HistoryMetrics,
+  MatchDraft,
+  MatchRecord,
+  PlayerComment,
+  PlayerMetricsEntry,
+  ZoneScore,
+} from "./types";
+import {
+  deleteCloudMatch,
+  deleteCloudPlayer,
+  fetchCloudData,
+  fetchPlayerComments,
+  likePlayerComment,
+  saveCloudMatch,
+  savePlayerComment,
+} from "./lib/cloud";
 import { formatDuration, formatNumber, formatPercent, parseDurationToSeconds, parseNumber } from "./lib/format";
 import { calculateHistoryMetrics, calculateSingleMatchMetrics, calculateZoneScore } from "./lib/metrics";
 import { extractMatchDraftFromText, recognizeImage } from "./lib/ocr";
@@ -19,6 +35,8 @@ const emptyDraft: MatchDraft = {
 };
 
 const emptySiteMetrics = calculateHistoryMetrics([]);
+const commentNicknameStorageKey = "apex:comment-nickname:v1";
+const likedCommentsStorageKey = "apex:liked-comments:v1";
 
 type OcrState = {
   status: "idle" | "reading" | "done" | "error";
@@ -32,6 +50,11 @@ type QueuedImage = {
 };
 
 type CloudState = {
+  status: "idle" | "loading" | "ready" | "saving" | "error";
+  message: string;
+};
+
+type CommentState = {
   status: "idle" | "loading" | "ready" | "saving" | "error";
   message: string;
 };
@@ -50,6 +73,14 @@ export default function App() {
   const [ocrRawText, setOcrRawText] = useState("");
   const [sourceImageName, setSourceImageName] = useState("");
   const [imageQueue, setImageQueue] = useState<QueuedImage[]>([]);
+  const [comments, setComments] = useState<PlayerComment[]>([]);
+  const [commentNickname, setCommentNickname] = useState(() => readLocalStorageValue(commentNicknameStorageKey));
+  const [commentDraft, setCommentDraft] = useState("");
+  const [likedCommentIds, setLikedCommentIds] = useState<Set<string>>(() => readLikedCommentIds());
+  const [commentState, setCommentState] = useState<CommentState>({
+    status: "idle",
+    message: "请先查询玩家档案，再开启评论区。",
+  });
   const [cloudState, setCloudState] = useState<CloudState>({
     status: "idle",
     message: "正在连接云端数据...",
@@ -80,6 +111,7 @@ export default function App() {
   });
 
   const activePlayerId = selectedPlayerId || queryPlayerId.trim() || draft.playerId.trim();
+  const commentPlayerId = selectedPlayerId;
   const activeMatches = matches;
   const latestMatch = activeMatches.length > 0 ? activeMatches[activeMatches.length - 1] : null;
   const latestMetrics = latestMatch ? calculateSingleMatchMetrics(latestMatch) : null;
@@ -94,6 +126,52 @@ export default function App() {
   );
   const recentMatches = useMemo(() => activeMatches.slice(-10).reverse(), [activeMatches]);
   const validationError = validateDraft(draft);
+  const commentValidationError = validateCommentInput(commentPlayerId, commentNickname, commentDraft);
+
+  useEffect(() => {
+    if (!commentPlayerId) {
+      setComments([]);
+      setCommentState({
+        status: "idle",
+        message: "请先查询玩家档案，再开启评论区。",
+      });
+      return;
+    }
+
+    let isStale = false;
+    setComments([]);
+    setCommentState({
+      status: "loading",
+      message: `正在加载 ${commentPlayerId} 的评论...`,
+    });
+
+    fetchPlayerComments(commentPlayerId)
+      .then((payload) => {
+        if (isStale) {
+          return;
+        }
+
+        setComments(payload.comments);
+        setCommentState({
+          status: "ready",
+          message: payload.comments.length > 0 ? `已加载 ${payload.comments.length} 条评论。` : "还没有评论，来写第一条吧。",
+        });
+      })
+      .catch((error) => {
+        if (isStale) {
+          return;
+        }
+
+        setCommentState({
+          status: "error",
+          message: error instanceof Error ? error.message : "评论加载失败。",
+        });
+      });
+
+    return () => {
+      isStale = true;
+    };
+  }, [commentPlayerId]);
 
   async function loadCloudData(playerId: string) {
     const trimmedPlayerId = playerId.trim();
@@ -129,6 +207,8 @@ export default function App() {
     if (preferredPlayerId) {
       setSelectedPlayerId(preferredPlayerId);
       setQueryPlayerId(preferredPlayerId);
+    } else {
+      setSelectedPlayerId("");
     }
   }
 
@@ -139,6 +219,7 @@ export default function App() {
 
   function handlePlayerSelect(playerId: string) {
     setQueryPlayerId(playerId);
+    setSelectedPlayerId(playerId);
     void loadCloudData(playerId);
   }
 
@@ -379,6 +460,90 @@ export default function App() {
     }
   }
 
+  function handleCommentNicknameChange(value: string) {
+    const nextNickname = limitTextLength(value, 12);
+    setCommentNickname(nextNickname);
+    writeLocalStorageValue(commentNicknameStorageKey, nextNickname);
+  }
+
+  function handleCommentDraftChange(value: string) {
+    setCommentDraft(limitTextLength(value, 200));
+  }
+
+  async function handlePublishComment() {
+    if (!commentPlayerId) {
+      setCommentState({
+        status: "error",
+        message: "请先查询玩家档案，再开启评论区。",
+      });
+      return;
+    }
+
+    const errorMessage = validateCommentInput(commentPlayerId, commentNickname, commentDraft);
+    if (errorMessage) {
+      setCommentState({
+        status: "error",
+        message: errorMessage,
+      });
+      return;
+    }
+
+    const nickname = commentNickname.trim();
+    const content = commentDraft.trim();
+    writeLocalStorageValue(commentNicknameStorageKey, nickname);
+    setCommentNickname(nickname);
+    setCommentState({
+      status: "saving",
+      message: "正在发布评论...",
+    });
+
+    try {
+      const payload = await savePlayerComment(commentPlayerId, nickname, content);
+      setComments(payload.comments);
+      setCommentDraft("");
+      setCommentState({
+        status: "ready",
+        message: `已发布到 ${commentPlayerId} 的评论区。`,
+      });
+    } catch (error) {
+      setCommentState({
+        status: "error",
+        message: error instanceof Error ? error.message : "评论发布失败。",
+      });
+    }
+  }
+
+  async function handleLikeComment(commentId: string) {
+    if (!commentPlayerId || likedCommentIds.has(commentId)) {
+      return;
+    }
+
+    setCommentState({
+      status: "saving",
+      message: "正在点赞...",
+    });
+
+    try {
+      const payload = await likePlayerComment(commentPlayerId, commentId);
+      setComments(payload.comments);
+      setLikedCommentIds((current) => {
+        const next = new Set(current);
+        next.add(commentId);
+        writeLikedCommentIds(next);
+        return next;
+      });
+      setCommentState({
+        status: "ready",
+        message: "点赞成功。",
+      });
+    } catch (error) {
+      setCommentState({
+        status: "error",
+        message: error instanceof Error ? error.message : "点赞失败。",
+      });
+    }
+  }
+
   return (
     <main
       className="app-shell"
@@ -548,7 +713,7 @@ export default function App() {
                   <MetricCard label="击倒转化率" value={formatPercent(latestMetrics.knockConversionRate, 1)} hint="击杀 / 击倒" />
                   <MetricCard label="纯击倒" value={String(latestMetrics.pureKnocks)} hint="击倒 - 击杀" />
                 </div>
-                {latestZoneScore ? <ZoneScoreCard title="本局区值评分" zoneScore={latestZoneScore} /> : null}
+                {latestZoneScore ? <ZoneScoreCard title="本局评分" zoneScore={latestZoneScore} /> : null}
               </>
             ) : (
               <EmptyState title="还没有单局报告" body="先查询玩家档案，或上传截图保存一局云端数据。" />
@@ -575,7 +740,7 @@ export default function App() {
 
           {activeMatches.length > 0 ? (
             <>
-              <ZoneScoreCard title="历史区值评分" zoneScore={historyZoneScore} />
+              <ZoneScoreCard title="历史评分" zoneScore={historyZoneScore} />
 
               <div className="summary-grid">
                 <MetricCard label="场均伤害" value={formatNumber(historyMetrics.avgDamage, 1)} hint="全部历史" />
@@ -622,6 +787,20 @@ export default function App() {
           ) : (
             <EmptyState title="这个 ID 暂无云端档案" body="输入玩家 ID 查询，或保存一局数据后自动创建该玩家档案。" />
           )}
+
+          <CommentSection
+            playerId={commentPlayerId}
+            comments={comments}
+            nickname={commentNickname}
+            content={commentDraft}
+            state={commentState}
+            likedCommentIds={likedCommentIds}
+            validationError={commentValidationError}
+            onNicknameChange={handleCommentNicknameChange}
+            onContentChange={handleCommentDraftChange}
+            onPublish={handlePublishComment}
+            onLike={handleLikeComment}
+          />
         </section>
       </div>
     </main>
@@ -684,7 +863,7 @@ function ZoneScoreCard({ title, zoneScore }: { title: string; zoneScore: ZoneSco
       <p>{zoneScore.explanation}</p>
       {zoneScore.sampleWarning ? <small className="zone-score-warning">{zoneScore.sampleWarning}</small> : null}
       {highlightedComponents.length > 0 ? (
-        <div className="zone-score-components" aria-label="区值评分主要加分项">
+        <div className="zone-score-components" aria-label="评分主要加分项">
           {highlightedComponents.map((component) => (
             <span key={component.label}>
               {component.label}评分 {component.score}/100
@@ -756,6 +935,128 @@ function RecentMatchesList({
   );
 }
 
+function CommentSection({
+  playerId,
+  comments,
+  nickname,
+  content,
+  state,
+  likedCommentIds,
+  validationError,
+  onNicknameChange,
+  onContentChange,
+  onPublish,
+  onLike,
+}: {
+  playerId: string;
+  comments: PlayerComment[];
+  nickname: string;
+  content: string;
+  state: CommentState;
+  likedCommentIds: Set<string>;
+  validationError: string;
+  onNicknameChange: (value: string) => void;
+  onContentChange: (value: string) => void;
+  onPublish: () => void | Promise<void>;
+  onLike: (commentId: string) => void | Promise<void>;
+}) {
+  if (!playerId) {
+    return (
+      <section className="comments-section" aria-labelledby="comments-title">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Comments</p>
+            <h3 id="comments-title">玩家评论区</h3>
+          </div>
+        </div>
+        <EmptyState title="请先查询玩家档案，再开启评论区。" body="评论会自动绑定到当前正在查看的玩家 ID。" />
+      </section>
+    );
+  }
+
+  return (
+    <section className="comments-section" aria-labelledby="comments-title">
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">Comments</p>
+          <h3 id="comments-title">玩家评论区</h3>
+        </div>
+        <span>当前 ID：{playerId}</span>
+      </div>
+
+      <div className="comment-composer">
+        <label className="field">
+          <span>你的昵称</span>
+          <input
+            value={nickname}
+            maxLength={12}
+            placeholder="1 到 12 个字"
+            onChange={(event) => onNicknameChange(event.target.value)}
+          />
+        </label>
+
+        <label className="field full">
+          <span>评论内容</span>
+          <textarea
+            value={content}
+            maxLength={200}
+            rows={4}
+            placeholder={`写给 ${playerId} 的评论`}
+            onChange={(event) => onContentChange(event.target.value)}
+          />
+        </label>
+
+        <div className="comment-composer-footer">
+          <span>{countTextLength(content.trim())}/200</span>
+          <button
+            type="button"
+            className="primary-button compact"
+            disabled={Boolean(validationError) || state.status === "saving" || state.status === "loading"}
+            onClick={() => void onPublish()}
+          >
+            发布
+          </button>
+        </div>
+
+        {validationError && (nickname || content) ? <p className="form-error">{validationError}</p> : null}
+      </div>
+
+      <div className={`comment-status ${state.status}`}>{state.message}</div>
+
+      {comments.length > 0 ? (
+        <div className="comment-list">
+          {comments.map((comment) => {
+            const hasLiked = likedCommentIds.has(comment.id);
+
+            return (
+              <article className="comment-row" key={comment.id}>
+                <header>
+                  <strong>{comment.nickname}</strong>
+                  <time dateTime={comment.createdAt}>{new Date(comment.createdAt).toLocaleString("zh-CN")}</time>
+                </header>
+                <p>{comment.content}</p>
+                <footer>
+                  <span>{comment.likes} 赞</span>
+                  <button
+                    type="button"
+                    className={`ghost-button comment-like-button${hasLiked ? " liked" : ""}`}
+                    disabled={hasLiked || state.status === "saving"}
+                    onClick={() => void onLike(comment.id)}
+                  >
+                    {hasLiked ? "已赞" : "点赞"}
+                  </button>
+                </footer>
+              </article>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="comment-empty">这个 ID 还没有评论。</div>
+      )}
+    </section>
+  );
+}
+
 function RadarNotes({ playerMetrics, siteMetrics }: { playerMetrics: HistoryMetrics; siteMetrics: HistoryMetrics }) {
   return (
     <div className="radar-notes">
@@ -792,6 +1093,24 @@ function RadarRow({ label, player, site }: { label: string; player: string; site
       <small>{site}</small>
     </div>
   );
+}
+
+function validateCommentInput(playerId: string, nickname: string, content: string) {
+  if (!playerId.trim()) {
+    return "请先查询玩家档案，再开启评论区。";
+  }
+
+  const nicknameLength = countTextLength(nickname.trim());
+  if (nicknameLength < 1 || nicknameLength > 12) {
+    return "昵称需要 1 到 12 个字。";
+  }
+
+  const contentLength = countTextLength(content.trim());
+  if (contentLength < 1 || contentLength > 200) {
+    return "评论内容需要 1 到 200 个字。";
+  }
+
+  return "";
 }
 
 function validateDraft(draft: MatchDraft) {
@@ -841,6 +1160,67 @@ function createId() {
   }
 
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function countTextLength(value: string) {
+  return Array.from(value).length;
+}
+
+function limitTextLength(value: string, maxLength: number) {
+  return Array.from(value).slice(0, maxLength).join("");
+}
+
+function readLocalStorageValue(key: string) {
+  if (typeof window === "undefined") {
+    return "";
+  }
+
+  try {
+    return window.localStorage.getItem(key) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function writeLocalStorageValue(key: string, value: string) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    if (value) {
+      window.localStorage.setItem(key, value);
+    } else {
+      window.localStorage.removeItem(key);
+    }
+  } catch {
+    // localStorage can be unavailable in private browsing modes.
+  }
+}
+
+function readLikedCommentIds() {
+  if (typeof window === "undefined") {
+    return new Set<string>();
+  }
+
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(likedCommentsStorageKey) ?? "[]");
+    return new Set(Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : []);
+  } catch {
+    return new Set<string>();
+  }
+}
+
+function writeLikedCommentIds(ids: Set<string>) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(likedCommentsStorageKey, JSON.stringify(Array.from(ids).slice(-2000)));
+  } catch {
+    // Best effort only; the server-side like count has already been updated.
+  }
 }
 
 function removeEmptyValues(draft: Partial<MatchDraft>) {

@@ -10,6 +10,15 @@ export type MatchRecord = {
   sourceImageName?: string;
 };
 
+export type PlayerComment = {
+  id: string;
+  playerId: string;
+  nickname: string;
+  content: string;
+  createdAt: string;
+  likes: number;
+};
+
 export type MatchDraft = {
   playerId: string;
   kills: string;
@@ -86,4 +95,8 @@ export type CloudDataResponse = {
   siteMetrics: HistoryMetrics;
   playerMetrics: PlayerMetricsEntry[];
   adminDeleteEnabled: boolean;
+};
+
+export type CommentDataResponse = {
+  comments: PlayerComment[];
 };

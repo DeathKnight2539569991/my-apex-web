@@ -1,5 +1,6 @@
 const PLAYERS_KEY = "apex:players:v1";
 const PLAYER_PREFIX = "apex:matches:v1:";
+const COMMENT_PREFIX = "apex:comments:v1:";
 
 export default async function handler(request, response) {
   try {
@@ -53,6 +54,7 @@ export default async function handler(request, response) {
       }
 
       await redis(["DEL", getPlayerKey(playerId)]);
+      await redis(["DEL", getCommentKey(playerId)]);
       await redis(["SREM", PLAYERS_KEY, playerId]);
 
       return sendJson(response, 200, await getCloudPayload(""));
@@ -340,6 +342,10 @@ function isMatchRecord(value) {
 
 function getPlayerKey(playerId) {
   return `${PLAYER_PREFIX}${Buffer.from(playerId, "utf8").toString("base64url")}`;
+}
+
+function getCommentKey(playerId) {
+  return `${COMMENT_PREFIX}${Buffer.from(playerId, "utf8").toString("base64url")}`;
 }
 
 function isReadableStream(value) {

@@ -632,3 +632,4 @@ function getCaptureErrorMessage(error: unknown) {
 
 function revokeScreenshots(screenshots: CapturedScreenshot[]) {
   screenshots.forEach((screenshot) => URL.revokeObjectURL(screenshot.previewUrl));
+}

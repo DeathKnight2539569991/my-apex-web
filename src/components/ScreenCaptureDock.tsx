@@ -1,74 +1,137 @@
-import { useEffect, useRef, useState, type MutableRefObject } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type MutableRefObject } from "react";
+import type { MatchDraft } from "../types";
+import { extractMatchDraftFromText, recognizeImage } from "../lib/ocr";
 
 type ScreenCaptureDockProps = {
-  onRecognizeImage: (file: File) => void;
+  onFillForm: (file: File) => void;
 };
 
 type CaptureStatus = "idle" | "starting" | "capturing" | "error";
+type CaptureRegionMode = "left" | "middle" | "right" | "full" | "custom";
+type Sensitivity = "strict" | "normal" | "loose";
+
+type CaptureRegion = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+type CaptureSettings = {
+  regionMode: CaptureRegionMode;
+  region: CaptureRegion;
+  sensitivity: Sensitivity;
+};
 
 type CapturedScreenshot = {
   id: string;
   file: File;
   previewUrl: string;
-  hash: string;
   capturedAt: number;
-  score: number;
+  confidence: number;
   width: number;
   height: number;
+  regionLabel: string;
+  summary: string;
 };
 
-type Region = {
-  x0: number;
-  y0: number;
-  x1: number;
-  y1: number;
-};
-
-type RegionMetrics = {
-  brightRatio: number;
-  darkRatio: number;
-  orangeRatio: number;
-  edgeRatio: number;
-};
-
-type FrameAnalysis = {
-  isCandidate: boolean;
+type OcrConfidence = {
   score: number;
-  hash: string;
-  reason: string;
+  matchedKeywords: string[];
+  parsedFields: string[];
 };
 
 const SAMPLE_INTERVAL_MS = 1500;
-const CAPTURE_COOLDOWN_MS = 105_000;
+const CAPTURE_COOLDOWN_MS = 120_000;
 const COOLDOWN_SECONDS = Math.round(CAPTURE_COOLDOWN_MS / 1000);
 const MAX_SCREENSHOTS = 18;
-const ANALYSIS_WIDTH = 480;
-const REQUIRED_CANDIDATE_FRAMES = 2;
-const HASH_GRID_SIZE = 16;
-const DUPLICATE_HASH_DISTANCE = 22;
+const SETTINGS_STORAGE_KEY = "apex:auto-capture-settings:v2";
 
-export default function ScreenCaptureDock({ onRecognizeImage }: ScreenCaptureDockProps) {
+const sensitivityThresholds: Record<Sensitivity, number> = {
+  strict: 70,
+  normal: 60,
+  loose: 45,
+};
+
+const sensitivityLabels: Record<Sensitivity, string> = {
+  strict: "严格 70",
+  normal: "普通 60",
+  loose: "宽松 45",
+};
+
+const regionLabels: Record<CaptureRegionMode, string> = {
+  left: "左侧数据栏",
+  middle: "中间数据栏",
+  right: "右侧数据栏",
+  full: "全屏",
+  custom: "自定义区域",
+};
+
+const regionPresets: Record<Exclude<CaptureRegionMode, "custom">, CaptureRegion> = {
+  left: { x: 0, y: 0, width: 0.35, height: 1 },
+  middle: { x: 0.325, y: 0, width: 0.35, height: 1 },
+  right: { x: 0.65, y: 0, width: 0.35, height: 1 },
+  full: { x: 0, y: 0, width: 1, height: 1 },
+};
+
+const defaultSettings: CaptureSettings = {
+  regionMode: "left",
+  region: regionPresets.left,
+  sensitivity: "normal",
+};
+
+const keywordPatterns: Array<[string, RegExp]> = [
+  ["击杀", /击杀|擊殺|杀敌|擊败|击败|kill/i],
+  ["助攻", /助攻|assist/i],
+  ["击倒", /击倒|擊倒|knock/i],
+  ["伤害", /造成伤害|造成傷害|伤害|傷害|damage/i],
+  ["生存时间", /生存时间|存活时间|生存|存活|survival/i],
+];
+
+const draftFieldChecks: Array<[keyof MatchDraft, string, RegExp]> = [
+  ["kills", "击杀", /^\d+$/],
+  ["assists", "助攻", /^\d+$/],
+  ["knocks", "击倒", /^\d+$/],
+  ["damage", "伤害", /^\d[\d,]*$/],
+  ["survivalTime", "生存时间", /^\d{1,2}:\d{2}(?::\d{2})?$/],
+];
+
+export default function ScreenCaptureDock({ onFillForm }: ScreenCaptureDockProps) {
+  const [settings, setSettings] = useState<CaptureSettings>(() => readCaptureSettings());
   const [status, setStatus] = useState<CaptureStatus>("idle");
-  const [message, setMessage] = useState("自动捕获只在本浏览器会话暂存截图，不会自动保存云端。");
+  const [message, setMessage] = useState("自动捕获只保存本地裁剪图，OCR 置信度达标后才加入待确认列表。");
   const [screenSourceName, setScreenSourceName] = useState("");
   const [screenshots, setScreenshots] = useState<CapturedScreenshot[]>([]);
-  const [lastScore, setLastScore] = useState<number | null>(null);
+  const [lastConfidence, setLastConfidence] = useState<number | null>(null);
+  const [lastSummary, setLastSummary] = useState("还未检测");
   const [cooldownSeconds, setCooldownSeconds] = useState(0);
+  const [isOcrChecking, setIsOcrChecking] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const timerRef = useRef<number | null>(null);
-  const analysisCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const captureCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const screenshotsRef = useRef<CapturedScreenshot[]>([]);
+  const activeRegionRef = useRef<CaptureRegion>(getActiveRegion(settings));
+  const settingsRef = useRef<CaptureSettings>(settings);
+  const thresholdRef = useRef(sensitivityThresholds[settings.sensitivity]);
   const lastCaptureAtRef = useRef(0);
-  const candidateFramesRef = useRef(0);
   const isSamplingRef = useRef(false);
   const isCapturingRef = useRef(false);
+
+  const activeRegion = useMemo(() => getActiveRegion(settings), [settings]);
+  const threshold = sensitivityThresholds[settings.sensitivity];
 
   useEffect(() => {
     screenshotsRef.current = screenshots;
   }, [screenshots]);
+
+  useEffect(() => {
+    settingsRef.current = settings;
+    activeRegionRef.current = activeRegion;
+    thresholdRef.current = threshold;
+    writeCaptureSettings(settings);
+  }, [activeRegion, settings, threshold]);
 
   useEffect(() => {
     return () => {
@@ -127,9 +190,8 @@ export default function ScreenCaptureDock({ onRecognizeImage }: ScreenCaptureDoc
       }
 
       isCapturingRef.current = true;
-      candidateFramesRef.current = 0;
       setStatus("capturing");
-      setMessage("正在自动扫描疑似 Apex 结算/战绩界面。捕获后会冷却约 105 秒。");
+      setMessage("捕获运行中：冷却外会裁剪所选区域并做 OCR，低置信度会直接丢弃。");
       startSampleTimer();
       void sampleCurrentFrame();
     } catch (error) {
@@ -177,7 +239,7 @@ export default function ScreenCaptureDock({ onRecognizeImage }: ScreenCaptureDoc
 
     isCapturingRef.current = false;
     isSamplingRef.current = false;
-    candidateFramesRef.current = 0;
+    setIsOcrChecking(false);
     setScreenSourceName("");
     setCooldownSeconds(0);
   }
@@ -194,74 +256,62 @@ export default function ScreenCaptureDock({ onRecognizeImage }: ScreenCaptureDoc
 
     const cooldownMs = getRemainingCooldownMs(lastCaptureAtRef.current);
     if (cooldownMs > 0) {
-      setCooldownSeconds(Math.ceil(cooldownMs / 1000));
-      setMessage(`已捕获截图，冷却中，约 ${Math.ceil(cooldownMs / 1000)} 秒后继续扫描。`);
+      const nextCooldownSeconds = Math.ceil(cooldownMs / 1000);
+      setCooldownSeconds(nextCooldownSeconds);
+      setMessage(`冷却中，约 ${nextCooldownSeconds} 秒后恢复检测。冷却期间不 OCR、不截图。`);
       return;
     }
 
     setCooldownSeconds(0);
     isSamplingRef.current = true;
+    setIsOcrChecking(true);
 
     try {
-      const analysis = analyzeCurrentFrame(video, analysisCanvasRef);
-      if (!analysis) {
+      const currentSettings = settingsRef.current;
+      const captured = await captureSelectedRegion(video, activeRegionRef.current, captureCanvasRef);
+      setMessage(`正在 OCR 检测${regionLabels[currentSettings.regionMode]}，低于 ${thresholdRef.current} 分会丢弃。`);
+
+      const result = await recognizeImage(captured.file, undefined, { cropMode: "none" });
+      const confidence = calculateOcrConfidence(result.text);
+      setLastConfidence(confidence.score);
+      setLastSummary(formatConfidenceSummary(confidence));
+
+      if (confidence.score < thresholdRef.current) {
+        setMessage(`本帧 OCR 置信度 ${confidence.score}，低于 ${thresholdRef.current}，已丢弃。`);
         return;
       }
 
-      setLastScore(analysis.score);
-      if (!analysis.isCandidate) {
-        candidateFramesRef.current = Math.max(0, candidateFramesRef.current - 1);
-        setMessage("捕获运行中，尚未发现稳定的疑似结算/战绩界面。");
-        return;
+      addCapturedScreenshot(captured, confidence, currentSettings.regionMode);
+    } catch (error) {
+      if (isCapturingRef.current) {
+        setMessage(error instanceof Error ? `本帧 OCR 检测失败：${error.message}` : "本帧 OCR 检测失败，继续等待下一帧。");
       }
-
-      candidateFramesRef.current += 1;
-      if (candidateFramesRef.current < REQUIRED_CANDIDATE_FRAMES) {
-        setMessage(`发现疑似战绩界面，正在二次确认：${analysis.reason}`);
-        return;
-      }
-
-      candidateFramesRef.current = 0;
-      await captureCandidateFrame(video, analysis);
     } finally {
       isSamplingRef.current = false;
+      setIsOcrChecking(false);
     }
   }
 
-  async function captureCandidateFrame(video: HTMLVideoElement, analysis: FrameAnalysis) {
+  function addCapturedScreenshot(
+    captured: Awaited<ReturnType<typeof captureSelectedRegion>>,
+    confidence: OcrConfidence,
+    regionMode: CaptureRegionMode,
+  ) {
     if (screenshotsRef.current.length >= MAX_SCREENSHOTS) {
-      setMessage(`本次已暂存 ${MAX_SCREENSHOTS} 张截图，已达到上限。请先识别、删除或清空。`);
+      setMessage(`本次已暂存 ${MAX_SCREENSHOTS} 张截图，已达到上限。请先填入表单、删除或清空。`);
       return;
     }
 
-    const duplicate = screenshotsRef.current.some(
-      (screenshot) => hammingDistance(screenshot.hash, analysis.hash) <= DUPLICATE_HASH_DISTANCE,
-    );
-    if (duplicate) {
-      setMessage("同一画面已经在待确认列表中，已跳过重复截图。");
-      return;
-    }
-
-    const canvas = getCanvas(captureCanvasRef);
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    const context = get2dContext(canvas);
-    context.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-    const blob = await canvasToBlob(canvas);
-    const file = new File([blob], createCaptureFileName(), {
-      type: "image/png",
-      lastModified: Date.now(),
-    });
     const screenshot: CapturedScreenshot = {
       id: createId(),
-      file,
-      previewUrl: URL.createObjectURL(file),
-      hash: analysis.hash,
+      file: captured.file,
+      previewUrl: URL.createObjectURL(captured.file),
       capturedAt: Date.now(),
-      score: analysis.score,
-      width: canvas.width,
-      height: canvas.height,
+      confidence: confidence.score,
+      width: captured.width,
+      height: captured.height,
+      regionLabel: regionLabels[regionMode],
+      summary: formatConfidenceSummary(confidence),
     };
 
     setScreenshots((current) => {
@@ -271,12 +321,12 @@ export default function ScreenCaptureDock({ onRecognizeImage }: ScreenCaptureDoc
     });
     lastCaptureAtRef.current = Date.now();
     setCooldownSeconds(COOLDOWN_SECONDS);
-    setMessage(`已自动捕获 1 张疑似战绩截图，进入约 ${COOLDOWN_SECONDS} 秒冷却。`);
+    setMessage(`OCR 置信度 ${confidence.score}，已加入待确认列表，进入 ${COOLDOWN_SECONDS} 秒冷却。`);
   }
 
-  function recognizeScreenshot(screenshot: CapturedScreenshot) {
-    onRecognizeImage(screenshot.file);
-    setMessage(`已把 ${screenshot.file.name} 加入现有 OCR 识别流程。`);
+  function fillFormFromScreenshot(screenshot: CapturedScreenshot) {
+    onFillForm(screenshot.file);
+    setMessage(`已把 ${screenshot.file.name} 送入现有 OCR 流程，自动捕获图不会二次裁剪。`);
   }
 
   function deleteScreenshot(id: string) {
@@ -301,6 +351,39 @@ export default function ScreenCaptureDock({ onRecognizeImage }: ScreenCaptureDoc
     setMessage("已清空本次自动捕获的待确认截图。");
   }
 
+  function handleRegionModeChange(event: ChangeEvent<HTMLSelectElement>) {
+    const nextMode = toCaptureRegionMode(event.currentTarget.value);
+    setSettings((current) => ({
+      ...current,
+      regionMode: nextMode,
+      region: nextMode === "custom" ? current.region : regionPresets[nextMode],
+    }));
+  }
+
+  function handleSensitivityChange(event: ChangeEvent<HTMLSelectElement>) {
+    const sensitivity = toSensitivity(event.currentTarget.value);
+    setSettings((current) => ({
+      ...current,
+      sensitivity,
+    }));
+  }
+
+  function handleCustomRegionChange(field: keyof CaptureRegion, value: string) {
+    const numericValue = Number(value);
+    if (!Number.isFinite(numericValue)) {
+      return;
+    }
+
+    setSettings((current) => ({
+      ...current,
+      regionMode: "custom",
+      region: normalizeRegion({
+        ...current.region,
+        [field]: numericValue / 100,
+      }),
+    }));
+  }
+
   const isCaptureActive = status === "starting" || status === "capturing";
   const captureLabel =
     status === "starting" ? "等待授权" : status === "capturing" ? "捕获中" : status === "error" ? "异常" : "未捕获";
@@ -313,6 +396,41 @@ export default function ScreenCaptureDock({ onRecognizeImage }: ScreenCaptureDoc
           <h3 id="screen-capture-title">浏览器自动捕获战绩截图</h3>
         </div>
         <span className={`capture-badge ${status}`}>{captureLabel}</span>
+      </div>
+
+      <div className="capture-settings">
+        <label className="capture-field">
+          <span>捕获区域</span>
+          <select value={settings.regionMode} onChange={handleRegionModeChange}>
+            <option value="left">左侧数据栏</option>
+            <option value="middle">中间数据栏</option>
+            <option value="right">右侧数据栏</option>
+            <option value="full">全屏</option>
+            <option value="custom">自定义区域</option>
+          </select>
+        </label>
+        <label className="capture-field">
+          <span>OCR 灵敏度</span>
+          <select value={settings.sensitivity} onChange={handleSensitivityChange}>
+            <option value="strict">严格 70</option>
+            <option value="normal">普通 60</option>
+            <option value="loose">宽松 45</option>
+          </select>
+        </label>
+      </div>
+
+      {settings.regionMode === "custom" ? (
+        <div className="capture-region-grid" aria-label="自定义捕获区域">
+          <NumberField label="左" value={activeRegion.x} onChange={(value) => handleCustomRegionChange("x", value)} />
+          <NumberField label="上" value={activeRegion.y} onChange={(value) => handleCustomRegionChange("y", value)} />
+          <NumberField label="宽" value={activeRegion.width} onChange={(value) => handleCustomRegionChange("width", value)} />
+          <NumberField label="高" value={activeRegion.height} onChange={(value) => handleCustomRegionChange("height", value)} />
+        </div>
+      ) : null}
+
+      <div className="capture-region-readout">
+        当前区域：x {formatRatio(activeRegion.x)} / y {formatRatio(activeRegion.y)} / w {formatRatio(activeRegion.width)} / h{" "}
+        {formatRatio(activeRegion.height)}
       </div>
 
       <div className="capture-actions">
@@ -331,8 +449,11 @@ export default function ScreenCaptureDock({ onRecognizeImage }: ScreenCaptureDoc
         <span>{message}</span>
         <small>
           {screenSourceName ? `${screenSourceName} · ` : ""}
-          {lastScore === null ? "未分析" : `疑似度 ${lastScore.toFixed(1)}`}
+          阈值 {threshold} · {lastConfidence === null ? "未 OCR" : `上次 OCR ${lastConfidence}`}
           {cooldownSeconds > 0 ? ` · 冷却 ${cooldownSeconds}s` : ""}
+          {isOcrChecking ? " · 正在 OCR" : ""}
+          {" · "}
+          {lastSummary}
         </small>
       </div>
 
@@ -346,21 +467,22 @@ export default function ScreenCaptureDock({ onRecognizeImage }: ScreenCaptureDoc
       </div>
 
       {screenshots.length === 0 ? (
-        <div className="capture-empty">停止捕获后，疑似战绩截图会留在这里等待你统一确认。</div>
+        <div className="capture-empty">达到 OCR 置信度阈值的裁剪截图会留在这里，赛后逐张填入表单。</div>
       ) : (
         <div className="capture-shot-list">
           {screenshots.map((screenshot) => (
             <article className="capture-shot-card" key={screenshot.id}>
-              <img src={screenshot.previewUrl} alt="自动捕获的 Apex 疑似战绩截图" />
+              <img src={screenshot.previewUrl} alt="自动捕获的 Apex 裁剪战绩截图" />
               <div className="capture-shot-meta">
                 <strong>{new Date(screenshot.capturedAt).toLocaleTimeString("zh-CN", { hour12: false })}</strong>
                 <span>
-                  {screenshot.width}x{screenshot.height} · 疑似度 {screenshot.score.toFixed(1)}
+                  {screenshot.regionLabel} · {screenshot.width}x{screenshot.height} · OCR {screenshot.confidence}
                 </span>
               </div>
+              <small className="capture-shot-summary">{screenshot.summary}</small>
               <div className="capture-shot-actions">
-                <button type="button" className="ghost-button" onClick={() => recognizeScreenshot(screenshot)}>
-                  识别这张
+                <button type="button" className="ghost-button" onClick={() => fillFormFromScreenshot(screenshot)}>
+                  填入表单
                 </button>
                 <button type="button" className="ghost-button danger" onClick={() => deleteScreenshot(screenshot.id)}>
                   删除
@@ -374,203 +496,161 @@ export default function ScreenCaptureDock({ onRecognizeImage }: ScreenCaptureDoc
   );
 }
 
-function analyzeCurrentFrame(
+function NumberField({ label, value, onChange }: { label: string; value: number; onChange: (value: string) => void }) {
+  return (
+    <label className="capture-field compact">
+      <span>{label}</span>
+      <input min="0" max="100" step="1" type="number" value={toPercent(value)} onChange={(event) => onChange(event.currentTarget.value)} />
+    </label>
+  );
+}
+
+async function captureSelectedRegion(
   video: HTMLVideoElement,
+  region: CaptureRegion,
   canvasRef: MutableRefObject<HTMLCanvasElement | null>,
-): FrameAnalysis | null {
+) {
+  const normalizedRegion = normalizeRegion(region);
+  const sourceX = Math.round(video.videoWidth * normalizedRegion.x);
+  const sourceY = Math.round(video.videoHeight * normalizedRegion.y);
+  const sourceWidth = Math.max(1, Math.min(video.videoWidth - sourceX, Math.round(video.videoWidth * normalizedRegion.width)));
+  const sourceHeight = Math.max(1, Math.min(video.videoHeight - sourceY, Math.round(video.videoHeight * normalizedRegion.height)));
   const canvas = getCanvas(canvasRef);
-  const targetWidth = Math.min(ANALYSIS_WIDTH, video.videoWidth);
-  const targetHeight = Math.max(1, Math.round((video.videoHeight / video.videoWidth) * targetWidth));
-  canvas.width = targetWidth;
-  canvas.height = targetHeight;
+  canvas.width = sourceWidth;
+  canvas.height = sourceHeight;
 
   const context = get2dContext(canvas);
-  context.drawImage(video, 0, 0, targetWidth, targetHeight);
-  const imageData = context.getImageData(0, 0, targetWidth, targetHeight);
-  const stats = inspectApexResultFrame(imageData);
+  context.drawImage(video, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, sourceWidth, sourceHeight);
+
+  const blob = await canvasToBlob(canvas);
+  const file = new File([blob], createCaptureFileName(), {
+    type: "image/png",
+    lastModified: Date.now(),
+  });
 
   return {
-    ...stats,
-    hash: createAverageHash(imageData),
+    file,
+    width: sourceWidth,
+    height: sourceHeight,
   };
 }
 
-function inspectApexResultFrame(imageData: ImageData) {
-  const { width, height } = imageData;
-  const leftPanel = createRegion(width, height, 0, 0.08, 0.48, 0.94);
-  const topBand = createRegion(width, height, 0.04, 0, 0.96, 0.24);
-  const centerPanel = createRegion(width, height, 0.28, 0.18, 0.9, 0.9);
-  const leftMetrics = measureRegion(imageData, leftPanel);
-  const topMetrics = measureRegion(imageData, topBand);
-  const centerMetrics = measureRegion(imageData, centerPanel);
-  const textRows = countTextRows(imageData, leftPanel);
+function calculateOcrConfidence(text: string): OcrConfidence {
+  const compactText = text.replace(/\s+/g, "");
+  const draft = extractMatchDraftFromText(text);
+  const matchedKeywords = keywordPatterns.filter(([, pattern]) => pattern.test(compactText)).map(([label]) => label);
+  const parsedFields = draftFieldChecks
+    .filter(([field, , pattern]) => {
+      const value = draft[field];
+      return typeof value === "string" && pattern.test(value.trim());
+    })
+    .map(([, label]) => label);
+  const score = Math.min(100, matchedKeywords.length * 6 + parsedFields.length * 14);
 
-  let score = 0;
-  const reasons: string[] = [];
-
-  if (leftMetrics.darkRatio > 0.32) {
-    score += 0.8;
-    reasons.push("暗色结算背景");
-  }
-  if (leftMetrics.brightRatio > 0.014 && leftMetrics.brightRatio < 0.22) {
-    score += 1.1;
-    reasons.push("左侧文字密度");
-  }
-  if (leftMetrics.orangeRatio > 0.0018 || topMetrics.orangeRatio > 0.0015) {
-    score += 1.1;
-    reasons.push("Apex 橙色 UI");
-  }
-  if (leftMetrics.edgeRatio > 0.045 && leftMetrics.edgeRatio < 0.34) {
-    score += 1.1;
-    reasons.push("数据栏边缘");
-  }
-  if (textRows >= 7) {
-    score += 1.4;
-    reasons.push("多行战绩文本");
-  }
-  if (topMetrics.brightRatio > 0.012 || topMetrics.orangeRatio > 0.0015) {
-    score += 0.7;
-    reasons.push("顶部标题区域");
-  }
-  if (centerMetrics.edgeRatio > 0.03 && centerMetrics.brightRatio > 0.006) {
-    score += 0.7;
-    reasons.push("结算面板结构");
-  }
-
-  const isCandidate = score >= 4.7 && textRows >= 6 && leftMetrics.brightRatio > 0.01;
   return {
-    isCandidate,
-    score: Math.round(score * 10) / 10,
-    reason: reasons.slice(0, 3).join(" / ") || "像素特征接近",
+    score,
+    matchedKeywords,
+    parsedFields,
   };
 }
 
-function createRegion(width: number, height: number, x0: number, y0: number, x1: number, y1: number): Region {
-  return {
-    x0: Math.floor(width * x0),
-    y0: Math.floor(height * y0),
-    x1: Math.floor(width * x1),
-    y1: Math.floor(height * y1),
-  };
+function formatConfidenceSummary(confidence: OcrConfidence) {
+  const keywords = confidence.matchedKeywords.length > 0 ? confidence.matchedKeywords.join("、") : "无关键词";
+  const fields = confidence.parsedFields.length > 0 ? confidence.parsedFields.join("、") : "无字段";
+  return `关键词：${keywords}；字段：${fields}`;
 }
 
-function measureRegion(imageData: ImageData, region: Region): RegionMetrics {
-  const { data, width } = imageData;
-  const step = 2;
-  let total = 0;
-  let bright = 0;
-  let dark = 0;
-  let orange = 0;
-  let edges = 0;
+function getActiveRegion(settings: CaptureSettings) {
+  return normalizeRegion(settings.regionMode === "custom" ? settings.region : regionPresets[settings.regionMode]);
+}
 
-  for (let y = region.y0; y < region.y1; y += step) {
-    for (let x = region.x0; x < region.x1; x += step) {
-      const offset = (y * width + x) * 4;
-      const red = data[offset];
-      const green = data[offset + 1];
-      const blue = data[offset + 2];
-      const luminance = getLuminance(red, green, blue);
-      const isOrange = isApexOrange(red, green, blue);
-      const isCyan = green > 130 && blue > 120 && red < 130;
+function readCaptureSettings(): CaptureSettings {
+  if (typeof window === "undefined") {
+    return defaultSettings;
+  }
 
-      total += 1;
-      if (luminance > 178 || isOrange || isCyan) {
-        bright += 1;
-      }
-      if (luminance < 64) {
-        dark += 1;
-      }
-      if (isOrange) {
-        orange += 1;
-      }
-      if (x + step < region.x1) {
-        const nextOffset = (y * width + x + step) * 4;
-        const nextLuminance = getLuminance(data[nextOffset], data[nextOffset + 1], data[nextOffset + 2]);
-        if (Math.abs(luminance - nextLuminance) > 52) {
-          edges += 1;
-        }
-      }
+  try {
+    const rawSettings = window.localStorage.getItem(SETTINGS_STORAGE_KEY);
+    if (!rawSettings) {
+      return defaultSettings;
     }
-  }
 
-  return {
-    brightRatio: total === 0 ? 0 : bright / total,
-    darkRatio: total === 0 ? 0 : dark / total,
-    orangeRatio: total === 0 ? 0 : orange / total,
-    edgeRatio: total === 0 ? 0 : edges / total,
-  };
-}
+    const parsed = JSON.parse(rawSettings) as Partial<CaptureSettings>;
+    const regionMode = toCaptureRegionMode(parsed.regionMode);
+    const sensitivity = toSensitivity(parsed.sensitivity);
+    const region = normalizeRegion(parsed.region ?? (regionMode === "custom" ? defaultSettings.region : regionPresets[regionMode]));
 
-function countTextRows(imageData: ImageData, region: Region) {
-  const rows = 34;
-  let hits = 0;
-
-  for (let row = 0; row < rows; row += 1) {
-    const rowRegion = {
-      x0: region.x0,
-      x1: region.x1,
-      y0: Math.floor(region.y0 + ((region.y1 - region.y0) * row) / rows),
-      y1: Math.floor(region.y0 + ((region.y1 - region.y0) * (row + 1)) / rows),
+    return {
+      regionMode,
+      sensitivity,
+      region: regionMode === "custom" ? region : regionPresets[regionMode],
     };
-    const metrics = measureRegion(imageData, rowRegion);
-
-    if (metrics.brightRatio > 0.008 && metrics.brightRatio < 0.24 && metrics.edgeRatio > 0.018) {
-      hits += 1;
-    }
+  } catch {
+    return defaultSettings;
   }
-
-  return hits;
 }
 
-function createAverageHash(imageData: ImageData) {
-  const { data, width, height } = imageData;
-  const cells: number[] = [];
-
-  for (let gy = 0; gy < HASH_GRID_SIZE; gy += 1) {
-    for (let gx = 0; gx < HASH_GRID_SIZE; gx += 1) {
-      const x0 = Math.floor((gx * width) / HASH_GRID_SIZE);
-      const x1 = Math.floor(((gx + 1) * width) / HASH_GRID_SIZE);
-      const y0 = Math.floor((gy * height) / HASH_GRID_SIZE);
-      const y1 = Math.floor(((gy + 1) * height) / HASH_GRID_SIZE);
-      let sum = 0;
-      let total = 0;
-
-      for (let y = y0; y < y1; y += 1) {
-        for (let x = x0; x < x1; x += 1) {
-          const offset = (y * width + x) * 4;
-          sum += getLuminance(data[offset], data[offset + 1], data[offset + 2]);
-          total += 1;
-        }
-      }
-
-      cells.push(total === 0 ? 0 : sum / total);
-    }
+function writeCaptureSettings(settings: CaptureSettings) {
+  if (typeof window === "undefined") {
+    return;
   }
 
-  const average = cells.reduce((total, value) => total + value, 0) / cells.length;
-  return cells.map((value) => (value >= average ? "1" : "0")).join("");
-}
-
-function getLuminance(red: number, green: number, blue: number) {
-  return red * 0.2126 + green * 0.7152 + blue * 0.0722;
-}
-
-function isApexOrange(red: number, green: number, blue: number) {
-  return red > 145 && green > 48 && green < 190 && blue < 135 && red > blue * 1.35;
-}
-
-function hammingDistance(left: string, right: string) {
-  if (left.length !== right.length) {
-    return Number.POSITIVE_INFINITY;
+  try {
+    window.localStorage.setItem(
+      SETTINGS_STORAGE_KEY,
+      JSON.stringify({
+        regionMode: settings.regionMode,
+        region: normalizeRegion(settings.region),
+        sensitivity: settings.sensitivity,
+      }),
+    );
+  } catch {
+    // localStorage can be unavailable in private browsing modes.
   }
+}
 
-  let distance = 0;
-  for (let index = 0; index < left.length; index += 1) {
-    if (left[index] !== right[index]) {
-      distance += 1;
-    }
+function toCaptureRegionMode(value: unknown): CaptureRegionMode {
+  if (value === "left" || value === "middle" || value === "right" || value === "full" || value === "custom") {
+    return value;
   }
-  return distance;
+  return "left";
+}
+
+function toSensitivity(value: unknown): Sensitivity {
+  if (value === "strict" || value === "normal" || value === "loose") {
+    return value;
+  }
+  return "normal";
+}
+
+function normalizeRegion(region: Partial<CaptureRegion>) {
+  const x = clamp(readRatio(region.x, defaultSettings.region.x), 0, 0.98);
+  const y = clamp(readRatio(region.y, defaultSettings.region.y), 0, 0.98);
+  const width = clamp(readRatio(region.width, defaultSettings.region.width), 0.02, 1 - x);
+  const height = clamp(readRatio(region.height, defaultSettings.region.height), 0.02, 1 - y);
+
+  return {
+    x,
+    y,
+    width,
+    height,
+  };
+}
+
+function readRatio(value: unknown, fallback: number) {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function toPercent(value: number) {
+  return Math.round(value * 100);
+}
+
+function formatRatio(value: number) {
+  return value.toFixed(2);
 }
 
 function getCanvas(canvasRef: MutableRefObject<HTMLCanvasElement | null>) {

@@ -6,6 +6,10 @@ type OcrProgress = {
   progress: number;
 };
 
+export type RecognizeImageOptions = {
+  cropMode?: "stats-panel" | "none";
+};
+
 export type OcrResult = {
   text: string;
   processedImageUrl: string;
@@ -30,8 +34,12 @@ const emptyDraft: MatchDraft = {
   survivalTime: "",
 };
 
-export async function recognizeImage(file: File, onProgress?: (progress: OcrProgress) => void): Promise<OcrResult> {
-  const processed = await preprocessStatPanel(file);
+export async function recognizeImage(
+  file: File,
+  onProgress?: (progress: OcrProgress) => void,
+  options: RecognizeImageOptions = {},
+): Promise<OcrResult> {
+  const processed = await preprocessStatPanel(file, options);
   const result = await Tesseract.recognize(processed.processedImageUrl, "chi_sim+eng", {
     logger: (message) => {
       if (message.status) {
@@ -61,12 +69,13 @@ export function extractMatchDraftFromText(text: string): Partial<MatchDraft> {
   return draft;
 }
 
-async function preprocessStatPanel(file: File): Promise<Omit<OcrResult, "text">> {
+async function preprocessStatPanel(file: File, options: RecognizeImageOptions): Promise<Omit<OcrResult, "text">> {
   const bitmap = await createImageBitmap(file);
   const sourceWidth = bitmap.width;
   const sourceHeight = bitmap.height;
-  const crop = chooseStatsCrop(bitmap.width, bitmap.height);
-  const scale = chooseScale(crop.width);
+  const shouldCropStatsPanel = options.cropMode !== "none";
+  const crop = shouldCropStatsPanel ? chooseStatsCrop(bitmap.width, bitmap.height) : chooseFullImageCrop(bitmap.width, bitmap.height);
+  const scale = chooseScale(crop.width, shouldCropStatsPanel);
   const canvas = document.createElement("canvas");
   const width = Math.round(crop.width * scale);
   const height = Math.round(crop.height * scale);
@@ -111,6 +120,15 @@ async function preprocessStatPanel(file: File): Promise<Omit<OcrResult, "text">>
   };
 }
 
+function chooseFullImageCrop(width: number, height: number) {
+  return {
+    x: 0,
+    y: 0,
+    width,
+    height,
+  };
+}
+
 function chooseStatsCrop(width: number, height: number) {
   const aspect = width / height;
   const cropRatio = aspect > 1.1 ? 0.34 : aspect >= 0.62 ? 0.49 : 1;
@@ -123,7 +141,10 @@ function chooseStatsCrop(width: number, height: number) {
   };
 }
 
-function chooseScale(cropWidth: number) {
+function chooseScale(cropWidth: number, shouldCropStatsPanel: boolean) {
+  if (!shouldCropStatsPanel && cropWidth > 900) {
+    return 1;
+  }
   if (cropWidth < 260) {
     return 4;
   }

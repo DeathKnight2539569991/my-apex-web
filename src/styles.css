@@ -369,6 +369,55 @@ button:disabled {
   gap: 8px;
 }
 
+.capture-settings {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.capture-field {
+  display: grid;
+  gap: 6px;
+}
+
+.capture-field span {
+  color: #cbbba8;
+  font-size: 13px;
+}
+
+.capture-field select,
+.capture-field input {
+  width: 100%;
+  border: 1px solid rgba(218, 199, 176, 0.22);
+  border-radius: 7px;
+  background: rgba(9, 9, 8, 0.72);
+  color: #fff3e2;
+  outline: none;
+  padding: 10px 11px;
+}
+
+.capture-field select:focus,
+.capture-field input:focus {
+  border-color: #ff8b54;
+  box-shadow: 0 0 0 3px rgba(255, 139, 84, 0.14);
+}
+
+.capture-region-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.capture-region-readout {
+  border: 1px solid rgba(224, 210, 190, 0.14);
+  border-radius: 7px;
+  background: rgba(32, 30, 27, 0.5);
+  color: #cbbba8;
+  padding: 9px 11px;
+  font-family: "Cascadia Mono", "Consolas", monospace;
+  font-size: 12px;
+}
+
 .capture-actions .primary-button,
 .capture-actions .ghost-button {
   width: auto;
@@ -436,7 +485,7 @@ button:disabled {
   border: 1px solid rgba(224, 210, 190, 0.13);
   border-radius: 6px;
   background: #050505;
-  object-fit: cover;
+  object-fit: contain;
 }
 
 .capture-shot-meta {
@@ -452,6 +501,11 @@ button:disabled {
   color: #cbbba8;
   font-size: 12px;
   text-align: right;
+}
+
+.capture-shot-summary {
+  color: #9f9180;
+  line-height: 1.45;
 }
 
 .capture-shot-actions .ghost-button {
@@ -1082,6 +1136,11 @@ button:disabled {
   .capture-shot-meta {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .capture-settings,
+  .capture-region-grid {
+    grid-template-columns: 1fr;
   }
 
   .capture-actions .primary-button,

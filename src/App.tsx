@@ -47,6 +47,7 @@ type OcrState = {
 type QueuedImage = {
   id: string;
   file: File;
+  alreadyCropped: boolean;
 };
 
 type CloudState = {
@@ -230,7 +231,7 @@ export default function App() {
     }));
   }
 
-  function enqueueImages(files: Iterable<File>) {
+  function enqueueImages(files: Iterable<File>, options: { alreadyCropped?: boolean } = {}) {
     const images = Array.from(files).filter(isImageFile);
     if (images.length === 0) {
       return;
@@ -239,6 +240,7 @@ export default function App() {
     const queuedImages = images.map((file) => ({
       id: createId(),
       file,
+      alreadyCropped: Boolean(options.alreadyCropped),
     }));
 
     if (hasActiveImage()) {
@@ -248,7 +250,7 @@ export default function App() {
 
     const [nextImage, ...remainingImages] = queuedImages;
     setImageQueue((current) => [...current, ...remainingImages]);
-    void processImage(nextImage.file);
+    void processImage(nextImage.file, { alreadyCropped: nextImage.alreadyCropped });
   }
 
   function hasActiveImage() {
@@ -263,11 +265,11 @@ export default function App() {
 
     setImageQueue((current) => current.slice(1));
     setDraft((current) => ({ ...emptyDraft, playerId: current.playerId }));
-    void processImage(nextImage.file);
+    void processImage(nextImage.file, { alreadyCropped: nextImage.alreadyCropped });
     return true;
   }
 
-  async function processImage(file: File) {
+  async function processImage(file: File, options: { alreadyCropped?: boolean } = {}) {
     setSourceImageName(file.name);
     setImagePreview((current) => {
       if (current) {
@@ -285,13 +287,17 @@ export default function App() {
     });
 
     try {
-      const result = await recognizeImage(file, ({ status, progress }) => {
-        setOcrState({
-          status: "reading",
-          message: translateOcrStatus(status),
-          progress,
-        });
-      });
+      const result = await recognizeImage(
+        file,
+        ({ status, progress }) => {
+          setOcrState({
+            status: "reading",
+            message: translateOcrStatus(status),
+            progress,
+          });
+        },
+        { cropMode: options.alreadyCropped ? "none" : "stats-panel" },
+      );
       const extracted = extractMatchDraftFromText(result.text);
 
       setProcessedPreview(result.processedImageUrl);
@@ -302,7 +308,9 @@ export default function App() {
       }));
       setOcrState({
         status: "done",
-        message: "识别完成，已优先处理左侧数据栏，请校对后再保存。",
+        message: options.alreadyCropped
+          ? "识别完成，自动捕获图已按原裁剪区域识别，请校对后再保存。"
+          : "识别完成，已优先处理左侧数据栏，请校对后再保存。",
         progress: 1,
       });
     } catch {
@@ -619,7 +627,7 @@ export default function App() {
               <div className="queue-status">待处理图片：{imageQueue.length} 张。保存当前校准后会自动进入下一张，也可以直接粘贴图片加入队列。</div>
             ) : null}
 
-            <ScreenCaptureDock onRecognizeImage={(file) => enqueueImages([file])} />
+            <ScreenCaptureDock onFillForm={(file) => enqueueImages([file], { alreadyCropped: true })} />
 
             <div className={`ocr-status ${ocrState.status}`}>
               <span>{ocrState.message}</span>

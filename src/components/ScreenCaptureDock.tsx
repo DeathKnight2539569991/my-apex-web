@@ -1,4 +1,13 @@
-import { useEffect, useMemo, useRef, useState, type ChangeEvent, type MutableRefObject } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type CSSProperties,
+  type MutableRefObject,
+  type PointerEvent,
+} from "react";
 import type { MatchDraft } from "../types";
 import { extractMatchDraftFromText, recognizeImage } from "../lib/ocr";
 
@@ -39,6 +48,16 @@ type OcrConfidence = {
   score: number;
   matchedKeywords: string[];
   parsedFields: string[];
+};
+
+type RegionPoint = {
+  x: number;
+  y: number;
+};
+
+type PreviewSize = {
+  width: number;
+  height: number;
 };
 
 const SAMPLE_INTERVAL_MS = 1500;
@@ -106,11 +125,14 @@ export default function ScreenCaptureDock({ onFillForm }: ScreenCaptureDockProps
   const [lastSummary, setLastSummary] = useState("还未检测");
   const [cooldownSeconds, setCooldownSeconds] = useState(0);
   const [isOcrChecking, setIsOcrChecking] = useState(false);
+  const [selectionPreviewUrl, setSelectionPreviewUrl] = useState("");
+  const [selectionPreviewSize, setSelectionPreviewSize] = useState<PreviewSize>({ width: 16, height: 9 });
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const timerRef = useRef<number | null>(null);
   const captureCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const screenshotsRef = useRef<CapturedScreenshot[]>([]);
   const activeRegionRef = useRef<CaptureRegion>(getActiveRegion(settings));
   const settingsRef = useRef<CaptureSettings>(settings);
@@ -118,6 +140,8 @@ export default function ScreenCaptureDock({ onFillForm }: ScreenCaptureDockProps
   const lastCaptureAtRef = useRef(0);
   const isSamplingRef = useRef(false);
   const isCapturingRef = useRef(false);
+  const dragStartRef = useRef<RegionPoint | null>(null);
+  const selectionPreviewUrlRef = useRef("");
 
   const activeRegion = useMemo(() => getActiveRegion(settings), [settings]);
   const threshold = sensitivityThresholds[settings.sensitivity];
@@ -125,6 +149,10 @@ export default function ScreenCaptureDock({ onFillForm }: ScreenCaptureDockProps
   useEffect(() => {
     screenshotsRef.current = screenshots;
   }, [screenshots]);
+
+  useEffect(() => {
+    selectionPreviewUrlRef.current = selectionPreviewUrl;
+  }, [selectionPreviewUrl]);
 
   useEffect(() => {
     settingsRef.current = settings;
@@ -146,6 +174,9 @@ export default function ScreenCaptureDock({ onFillForm }: ScreenCaptureDockProps
         videoRef.current.srcObject = null;
       }
       revokeScreenshots(screenshotsRef.current);
+      if (selectionPreviewUrlRef.current) {
+        URL.revokeObjectURL(selectionPreviewUrlRef.current);
+      }
     };
   }, []);
 
@@ -384,9 +415,107 @@ export default function ScreenCaptureDock({ onFillForm }: ScreenCaptureDockProps
     }));
   }
 
+  async function refreshSelectionPreview() {
+    const video = videoRef.current;
+    if (!video || video.videoWidth === 0 || video.videoHeight === 0) {
+      setMessage("请先点击“开始自动捕获”并选择 Apex 窗口或屏幕，再框选自定义区域。");
+      return;
+    }
+
+    const canvas = getCanvas(previewCanvasRef);
+    const previewWidth = Math.min(960, video.videoWidth);
+    const previewHeight = Math.max(1, Math.round((video.videoHeight / video.videoWidth) * previewWidth));
+    canvas.width = previewWidth;
+    canvas.height = previewHeight;
+
+    const context = get2dContext(canvas);
+    context.drawImage(video, 0, 0, previewWidth, previewHeight);
+
+    const blob = await canvasToBlob(canvas);
+    const previewUrl = URL.createObjectURL(blob);
+    setSelectionPreviewUrl((current) => {
+      if (current) {
+        URL.revokeObjectURL(current);
+      }
+      return previewUrl;
+    });
+    setSelectionPreviewSize({ width: previewWidth, height: previewHeight });
+    setSettings((current) => ({
+      ...current,
+      regionMode: "custom",
+      region: getActiveRegion(current),
+    }));
+    setMessage("已取样当前画面。请在预览图上拖拽框选你自己的数据栏区域。");
+  }
+
+  function closeSelectionPreview() {
+    setSelectionPreviewUrl((current) => {
+      if (current) {
+        URL.revokeObjectURL(current);
+      }
+      return "";
+    });
+    dragStartRef.current = null;
+  }
+
+  function handleRegionPointerDown(event: PointerEvent<HTMLDivElement>) {
+    if (!selectionPreviewUrl) {
+      return;
+    }
+
+    const point = getPointerRatio(event);
+    dragStartRef.current = point;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    applyRegionFromPoints(point, point);
+  }
+
+  function handleRegionPointerMove(event: PointerEvent<HTMLDivElement>) {
+    if (!dragStartRef.current) {
+      return;
+    }
+
+    applyRegionFromPoints(dragStartRef.current, getPointerRatio(event));
+  }
+
+  function handleRegionPointerUp(event: PointerEvent<HTMLDivElement>) {
+    if (!dragStartRef.current) {
+      return;
+    }
+
+    applyRegionFromPoints(dragStartRef.current, getPointerRatio(event));
+    dragStartRef.current = null;
+    event.currentTarget.releasePointerCapture(event.pointerId);
+    setMessage("自定义捕获区域已保存。自动捕获会只保存这个裁剪区域。");
+  }
+
+  function applyRegionFromPoints(start: RegionPoint, end: RegionPoint) {
+    const nextRegion = normalizeRegion({
+      x: Math.min(start.x, end.x),
+      y: Math.min(start.y, end.y),
+      width: Math.abs(end.x - start.x),
+      height: Math.abs(end.y - start.y),
+    });
+
+    setSettings((current) => ({
+      ...current,
+      regionMode: "custom",
+      region: nextRegion,
+    }));
+  }
+
   const isCaptureActive = status === "starting" || status === "capturing";
+  const canPickRegion = status === "capturing";
   const captureLabel =
     status === "starting" ? "等待授权" : status === "capturing" ? "捕获中" : status === "error" ? "异常" : "未捕获";
+  const selectionBoxStyle = {
+    left: `${activeRegion.x * 100}%`,
+    top: `${activeRegion.y * 100}%`,
+    width: `${activeRegion.width * 100}%`,
+    height: `${activeRegion.height * 100}%`,
+  } satisfies CSSProperties;
+  const pickerStyle = {
+    aspectRatio: `${selectionPreviewSize.width} / ${selectionPreviewSize.height}`,
+  } satisfies CSSProperties;
 
   return (
     <section className="screen-capture-dock" aria-labelledby="screen-capture-title">
@@ -425,6 +554,36 @@ export default function ScreenCaptureDock({ onFillForm }: ScreenCaptureDockProps
           <NumberField label="上" value={activeRegion.y} onChange={(value) => handleCustomRegionChange("y", value)} />
           <NumberField label="宽" value={activeRegion.width} onChange={(value) => handleCustomRegionChange("width", value)} />
           <NumberField label="高" value={activeRegion.height} onChange={(value) => handleCustomRegionChange("height", value)} />
+        </div>
+      ) : null}
+
+      <div className="capture-region-tools">
+        <button type="button" className="ghost-button" disabled={!canPickRegion} onClick={() => void refreshSelectionPreview()}>
+          {selectionPreviewUrl ? "刷新画面预览" : "在当前画面上框选区域"}
+        </button>
+        {selectionPreviewUrl ? (
+          <button type="button" className="ghost-button" onClick={closeSelectionPreview}>
+            关闭框选预览
+          </button>
+        ) : null}
+        <span>先开始自动捕获并授权屏幕，然后在预览图上拖拽选择自己的数据栏。</span>
+      </div>
+
+      {selectionPreviewUrl ? (
+        <div
+          className="capture-region-picker"
+          style={pickerStyle}
+          onPointerDown={handleRegionPointerDown}
+          onPointerMove={handleRegionPointerMove}
+          onPointerUp={handleRegionPointerUp}
+          onPointerCancel={() => {
+            dragStartRef.current = null;
+          }}
+          role="application"
+          aria-label="拖拽框选自定义捕获区域"
+        >
+          <img src={selectionPreviewUrl} alt="用于框选捕获区域的当前共享画面预览" draggable={false} />
+          <div className="capture-region-selection" style={selectionBoxStyle} />
         </div>
       ) : null}
 
@@ -503,6 +662,14 @@ function NumberField({ label, value, onChange }: { label: string; value: number;
       <input min="0" max="100" step="1" type="number" value={toPercent(value)} onChange={(event) => onChange(event.currentTarget.value)} />
     </label>
   );
+}
+
+function getPointerRatio(event: PointerEvent<HTMLDivElement>): RegionPoint {
+  const rect = event.currentTarget.getBoundingClientRect();
+  return {
+    x: clamp((event.clientX - rect.left) / rect.width, 0, 1),
+    y: clamp((event.clientY - rect.top) / rect.height, 0, 1),
+  };
 }
 
 async function captureSelectedRegion(

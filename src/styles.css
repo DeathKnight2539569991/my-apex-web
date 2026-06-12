@@ -408,6 +408,54 @@ button:disabled {
   gap: 8px;
 }
 
+.capture-region-tools {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  border: 1px solid rgba(224, 210, 190, 0.14);
+  border-radius: 7px;
+  background: rgba(32, 30, 27, 0.46);
+  padding: 9px;
+}
+
+.capture-region-tools span {
+  color: #cbbba8;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.capture-region-picker {
+  position: relative;
+  width: 100%;
+  min-height: 180px;
+  border: 1px solid rgba(244, 207, 169, 0.3);
+  border-radius: 8px;
+  background: #050505;
+  overflow: hidden;
+  cursor: crosshair;
+  touch-action: none;
+  user-select: none;
+}
+
+.capture-region-picker img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  pointer-events: none;
+}
+
+.capture-region-selection {
+  position: absolute;
+  border: 2px solid #ffcf62;
+  background: rgba(255, 207, 98, 0.16);
+  box-shadow:
+    0 0 0 9999px rgba(0, 0, 0, 0.38),
+    0 0 24px rgba(255, 207, 98, 0.34);
+  pointer-events: none;
+}
+
 .capture-region-readout {
   border: 1px solid rgba(224, 210, 190, 0.14);
   border-radius: 7px;
@@ -1141,6 +1189,15 @@ button:disabled {
   .capture-settings,
   .capture-region-grid {
     grid-template-columns: 1fr;
+  }
+
+  .capture-region-tools {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .capture-region-tools .ghost-button {
+    width: 100%;
   }
 
   .capture-actions .primary-button,

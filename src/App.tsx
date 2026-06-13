@@ -1265,8 +1265,8 @@ function getClipboardImageFiles(event: ClipboardEvent) {
 
 function translateOcrStatus(status: string) {
   const statusMap: Record<string, string> = {
-    "loading tesseract core": "正在加载 OCR 引擎...",
-    "initializing tesseract": "正在初始化 OCR...",
+    "preprocessing image": "正在预处理截图...",
+    "uploading image": "正在提交 OCR 服务...",
     "loading language traineddata": "正在加载中英文识别模型...",
     "initializing api": "正在准备识别...",
     "recognizing text": "正在识别截图文字...",

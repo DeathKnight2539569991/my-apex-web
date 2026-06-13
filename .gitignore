@@ -10,3 +10,4 @@ preview*.png
 tsconfig.*.tsbuildinfo
 agent.md
 todo.md
+paddleocr/

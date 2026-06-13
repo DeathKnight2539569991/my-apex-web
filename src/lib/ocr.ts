@@ -1,4 +1,3 @@
-import Tesseract from "tesseract.js";
 import type { MatchDraft } from "../types";
 
 type OcrProgress = {
@@ -25,6 +24,11 @@ export type OcrResult = {
   };
 };
 
+type OcrApiResponse = {
+  text?: unknown;
+  error?: unknown;
+};
+
 const emptyDraft: MatchDraft = {
   playerId: "",
   kills: "",
@@ -39,21 +43,15 @@ export async function recognizeImage(
   onProgress?: (progress: OcrProgress) => void,
   options: RecognizeImageOptions = {},
 ): Promise<OcrResult> {
+  onProgress?.({ status: "preprocessing image", progress: 0.12 });
   const processed = await preprocessStatPanel(file, options);
-  const result = await Tesseract.recognize(processed.processedImageUrl, "chi_sim+eng", {
-    logger: (message) => {
-      if (message.status) {
-        onProgress?.({
-          status: message.status,
-          progress: message.progress ?? 0,
-        });
-      }
-    },
-  });
+  onProgress?.({ status: "uploading image", progress: 0.35 });
+  const text = await recognizeWithRemoteService(processed.processedImageUrl);
+  onProgress?.({ status: "recognizing text", progress: 1 });
 
   return {
     ...processed,
-    text: result.data.text,
+    text,
   };
 }
 
@@ -67,6 +65,26 @@ export function extractMatchDraftFromText(text: string): Partial<MatchDraft> {
   parseSurvivalTime(lines, compactText, draft);
 
   return draft;
+}
+
+async function recognizeWithRemoteService(image: string) {
+  const response = await fetch("/api/ocr", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ image }),
+  });
+  const payload = (await response.json().catch(() => ({}))) as OcrApiResponse;
+
+  if (!response.ok) {
+    throw new Error(typeof payload.error === "string" ? payload.error : "OCR service request failed.");
+  }
+  if (typeof payload.text !== "string") {
+    throw new Error("OCR service returned an invalid response.");
+  }
+
+  return payload.text;
 }
 
 async function preprocessStatPanel(file: File, options: RecognizeImageOptions): Promise<Omit<OcrResult, "text">> {
@@ -110,14 +128,56 @@ async function preprocessStatPanel(file: File, options: RecognizeImageOptions): 
   context.putImageData(imageData, 0, 0);
   bitmap.close();
 
+  const processedImageUrl = await canvasToUploadDataUrl(canvas);
+
   return {
-    processedImageUrl: canvas.toDataURL("image/png"),
+    processedImageUrl,
     crop,
     source: {
       width: sourceWidth,
       height: sourceHeight,
     },
   };
+}
+
+async function canvasToUploadDataUrl(canvas: HTMLCanvasElement) {
+  const png = canvas.toDataURL("image/png");
+  if (isSmallEnoughForVercel(png)) {
+    return png;
+  }
+
+  for (const quality of [0.92, 0.84, 0.76, 0.68, 0.6]) {
+    const webp = await canvasToDataUrl(canvas, "image/webp", quality);
+    if (isSmallEnoughForVercel(webp)) {
+      return webp;
+    }
+  }
+
+  throw new Error("OCR image is too large after preprocessing. Please crop the screenshot smaller and try again.");
+}
+
+function isSmallEnoughForVercel(dataUrl: string) {
+  return dataUrl.length <= 4_000_000;
+}
+
+function canvasToDataUrl(canvas: HTMLCanvasElement, type: string, quality?: number) {
+  return new Promise<string>((resolve) => {
+    canvas.toBlob(
+      (blob) => {
+        if (!blob) {
+          resolve(canvas.toDataURL(type, quality));
+          return;
+        }
+
+        const reader = new FileReader();
+        reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : canvas.toDataURL(type, quality));
+        reader.onerror = () => resolve(canvas.toDataURL(type, quality));
+        reader.readAsDataURL(blob);
+      },
+      type,
+      quality,
+    );
+  });
 }
 
 function chooseFullImageCrop(width: number, height: number) {
